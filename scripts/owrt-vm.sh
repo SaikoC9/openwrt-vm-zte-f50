@@ -447,12 +447,16 @@ cpu_sample() {
   for t in /proc/"$p"/task/*; do
     [ -r "$t/stat" ] || continue
     read -r line < "$t/stat" 2>/dev/null || continue
-    nm=${line#*(}; nm=${nm%) *}
-    rest=${line##*) }
+    # parens held in variables: a lone ( or ) inside ${...} trips the Android sh
+    lp='('; rp=')'
+    nm=${line#*"$lp"}; nm=${nm%"$rp "*}
+    rest=${line##*"$rp "}
     # shellcheck disable=SC2086
     set -- $rest
     [ $# -ge 13 ] || continue
-    echo "${t##*/} $(( ${12} + ${13} )) $nm"
+    ut=${12}; st=${13}
+    tk=$((ut + st))
+    echo "${t##*/} $tk $nm"
   done
 }
 
@@ -473,17 +477,23 @@ cmd_cpu() {
   : > "$D"
   vc=0; ot=0
   while read -r tid tb nm; do
-    ta=$(sed -n "s/^$tid \([0-9]*\) .*/\1/p" "$A" | head -n 1)
+    ta=$(grep "^$tid " "$A" | head -n 1)
+    ta=${ta#* }; ta=${ta%% *}
     [ -n "$ta" ] || ta=0
-    d=$(( (tb - ta) * 1000 / (secs * CLK_TCK) ))
-    case $nm in vcpu*) vc=$((vc + d)) ;; *) ot=$((ot + d)) ;; esac
+    dl=$((tb - ta))
+    dn=$((secs * CLK_TCK))
+    d=$((dl * 1000 / dn))
+    if [ "${nm#vcpu}" != "$nm" ]; then vc=$((vc + d)); else ot=$((ot + d)); fi
     [ "$d" -ge 1 ] && echo "$d $nm" >> "$D"
   done < "$B"
   say "CPU over ${secs}s, 100% = one core (cpus=$CPUS, mem=$MEM)"
   sort -rn "$D" | while read -r d nm; do
-    say "  $(printf '%-22s' "$nm") $((d / 10)).$((d % 10))%"
+    pn=$(printf '%-22s' "$nm")
+    di=$((d / 10)); dt=$((d % 10))
+    say "  $pn $di.$dt%"
   done
-  say "vcpu threads: $((vc / 10)).$((vc % 10))%   other VMM threads: $((ot / 10)).$((ot % 10))%"
+  vi=$((vc / 10)); vt=$((vc % 10)); oi=$((ot / 10)); otn=$((ot % 10))
+  say "vcpu threads: $vi.$vt%   other VMM threads: $oi.$otn%"
   hp=$(head -n 1 "$HALT_FILE" 2>/dev/null)
   say "KVM halt_poll_ns now: ${hp:-unknown} (HALT_POLL=${HALT_POLL:-unset})"
   rm -f "$A" "$B" "$D"
