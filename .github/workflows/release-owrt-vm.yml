@@ -1,6 +1,6 @@
 name: Release OpenWrt VM (GitHub release + plugin pin)
 
-# Packages two finished CI builds into the six release files, publishes the GitHub
+# Packages two finished CI builds into the release (openwrt-vm-arm64.tar.gz, MANIFEST, SHA256SUMS), publishes the GitHub
 # release and prints the PIN_SUMS_SHA256 for the plugin. Nothing is rebuilt: give it the
 # run numbers of a green "Build OpenWrt VM tools (arm64)" run and a green
 # "Build OpenWrt guest" run (the number in the run's address: .../actions/runs/NUMBER).
@@ -99,7 +99,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist/release
-          gh release create "v$VERSION" Image MANIFEST SHA256SUMS cloud-hypervisor owrt-vm.sh rootfs.img.gz \
+          gh release create "v$VERSION" openwrt-vm-arm64.tar.gz MANIFEST SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v$VERSION" \
             --notes "OpenWrt VM release $VERSION. Plugin pin (SHA-256 of SHA256SUMS): ${{ steps.pack.outputs.pin }}"
 
