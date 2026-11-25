@@ -1,4 +1,4 @@
-name: Build OpenWruest (Image + rootfs.img)
+name: Build OpenWrt guest (Image + rootfs.img)
 
 on:
   workflow_dispatch:
