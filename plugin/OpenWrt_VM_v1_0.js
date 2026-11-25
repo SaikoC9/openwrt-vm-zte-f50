@@ -533,6 +533,7 @@ esac
     const r = await runRoot(`[ -f ${MGR} ] || { echo installed=0; exit 0; }\n${mgr(`state${probe ? ' probe' : ''}`)}`, 25000);
     const st = parseKv(r.text);
     st.installed = st.installed === '0' ? '0' : '1';
+    if (!st.release) st.release = st.version || '';   // owrt-vm.sh prints the installed release as "version"
     st.ok = r.ok;
     return st;
   };

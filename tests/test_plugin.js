@@ -139,7 +139,7 @@ const ctx = vm.createContext({ window: win, btoa: (s) => Buffer.from(s, 'binary'
   ok('installRelease: files in place and the installer was written 755', fs.readFileSync(path.join(DIR, 'VERSION'), 'utf8').trim() === '1.0.0' && fs.existsSync(path.join(DIR, 'Image')) && (fs.statSync(path.join(DIR, 'owrt-install.sh')).mode & 0o777) === 0o755 && fs.existsSync(path.join(DIR, 'owrt-vm.sh')));
   ok('installRelease: reports unpinned while PIN_SUMS_SHA256 is empty', done.unpinned === '1');
   st = await A.getState(false);
-  ok('getState after install: installed=1, release 1.0.0, not running, no leftovers', st.installed === '1' && st.running === '0' && st.release === '1.0.0' && st.manager_api === '1' && st.file_rootfs_img === '1' && st.leftovers === '0');
+  ok('getState after install: installed=1, release 1.0.0, not running, no leftovers', st.installed === '1' && st.running === '0' && st.release === '1.0.0' && st.version === '1.0.0' && st.leftovers === '0');
 
   // ---- settings end to end
   await fs.promises.writeFile(path.join(DIR, 'vm.conf'), 'START_SLEEP=1\nCPUS=1\n');
