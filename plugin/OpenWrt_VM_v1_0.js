@@ -622,34 +622,52 @@ esac
     if (busy > 0) return;
     const s = session;
     const btn = ev?.currentTarget instanceof HTMLElement ? ev.currentTarget : null;
-    const label = btn?.textContent;
+    const label = btn?.innerHTML;
     setBusy(true, s);
     if (btn && busyText) btn.textContent = busyText;
     try { await fn(); } catch (e) { toast(`Failed: ${e?.message || e}`, 'red', 8000); } finally {
-      if (btn && label != null) btn.textContent = label;
+      if (btn && label != null) btn.innerHTML = label;
       setBusy(false, s);
       try { await refresh(); } catch (_) { /* ignore */ }
     }
   };
   const confirmBox = (text) => (typeof window.confirm === 'function' ? window.confirm(text) : true);
 
+  const ICONS = {
+    refresh: 'M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4 M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4',
+    play: 'M7 4v16l13 -8z',
+    stop: 'M5 5m0 2a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2z',
+    ext: 'M12 6h-6a2 2 0 0 0 -2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-6 M11 13l9 -9 M15 4h5v5',
+    act: 'M3 12h4l3 8l4 -16l3 8h4',
+    copy: 'M7 9.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667z M4.012 16.737a2.005 2.005 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1',
+    trash: 'M4 7l16 0 M10 11l0 6 M14 11l0 6 M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12 M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3',
+    down: 'M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2 M7 11l5 5l5 -5 M12 4l0 12',
+  };
+  const ico = (n) => `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${ICONS[n]}"/></svg>`;
+
+  // [colour class, title, detail line]
   const hero = (st) => {
-    if (!st || !st.ok) return ['warn', '● Could not read the device state'];
-    if (st.installed === '0') return ['off', '● Not installed. Open Maintenance and press Install.'];
+    if (!st || !st.ok) return ['warn', 'Could not read the device state', 'Press refresh to try again.'];
+    if (st.installed === '0') return ['off', 'Not installed', 'Open Maintenance below and press Install.'];
     if (st.running === '1') {
       const bits = [`up ${st.etime || '…'}`];
       if (st.guest_ping === '1') bits.push(st.luci === '1' ? 'LuCI ready' : 'booting');
       if (st.joined === '1') bits.push('serving the hotspot');
-      return ['on', `● Running (${bits.join(', ')})`];
+      return ['on', 'Running', bits.join(' · ')];
     }
-    return Number(st.leftovers || 0) > 0 ? ['warn', `● Stopped, ${st.leftovers} leftover(s): press Stop to clean`] : ['off', '● Stopped'];
+    const left = Number(st.leftovers || 0);
+    return left > 0 ? ['warn', 'Stopped', `${left} leftover(s): press Stop to clean`] : ['off', 'Stopped', 'The VM is off'];
   };
+
+  const sshText = (st) => (st.joined === '1' ? `root@${st.lan_ip}` : st.expose === '1' ? `port ${st.ssh_port} on the hotspot address` : `root@${st.guest_ip} (from the phone only)`);
 
   const paint = (st) => {
     lastState = st;
-    const [cls, text] = hero(st);
-    const h = q('#ow_hero');
-    if (h) { h.className = `ow-hero ${cls}`; h.textContent = text; }
+    const [cls, title, sub] = hero(st);
+    const head = q('#ow_head');
+    if (head) head.className = `ow-head ${cls}`;
+    setText('#ow_hero', title);
+    setText('#ow_sub', sub);
     const run = st?.running === '1';
     const inst0 = st?.installed !== '0';
     const dis = (id, d) => { const b = q(id); if (b) b.style.display = d ? 'none' : ''; };
@@ -659,14 +677,21 @@ esac
     dis('#ow_join', !(run && st?.lan === '1' && st?.joined !== '1'));
     dis('#ow_unjoin', !(run && st?.joined === '1'));
     dis('#ow_luci', !run);
-    setText('#ow_rel', `Release installed: ${st?.release || 'none'}   Plugin pinned to: ${RELEASE_TAG}${PIN_SUMS_SHA256 ? '' : ' (unpinned)'}`);
-    setText('#ow_mem', st?.mem_avail_kb ? `Free memory on the phone: ${fmtMb(Number(st.mem_avail_kb))}` : '');
+    setText('#ow_install', inst0 ? 'Reinstall' : 'Install');
+    setText('#ow_rel', `${st?.release || 'none'} · ${PIN_SUMS_SHA256 ? 'pinned' : 'unpinned'}`);
+    setText('#ow_mem', st?.mem_avail_kb ? fmtMb(Number(st.mem_avail_kb)) : '–');
+    setText('#ow_vm', st?.cpus && st?.mem ? `${st.cpus} CPU · ${st.mem}` : '–');
+    setText('#ow_hs', run ? (st.joined === '1' ? 'OpenWrt serves' : st.lan === '1' ? 'Not joined yet' : 'Off') : (st?.lan === '1' ? 'On at next start' : 'Off'));
+    const card = q('#ow_accesscard');
+    if (card) card.style.display = run ? '' : 'none';
     const url = luciUrl(st, location.hostname);
-    const note = run
-      ? (url ? `LuCI: ${url}   SSH: ${st.joined === '1' ? `root@${st.lan_ip}` : st.expose === '1' ? `port ${st.ssh_port} on the hotspot address` : `root@${st.guest_ip} (from the phone only)`}`
-        : 'LuCI has no address from this page. Turn on "Open LuCI/SSH from the hotspot" in Settings, or use hotspot mode.')
-      : '';
-    setText('#ow_access', note);
+    setText('#ow_access', url ? `LuCI  ${url}` : 'LuCI has no address from this page. Turn on "Open LuCI and SSH from the hotspot" in Settings, or use hotspot mode.');
+    const cl = q('#ow_copy_luci'); if (cl) { cl.dataset.v = url || ''; cl.style.display = url ? '' : 'none'; }
+    if (run) {
+      const ssh = sshText(st);
+      setText('#ow_ssh_txt', `SSH   ${ssh}`);
+      const cs = q('#ow_copy_ssh'); if (cs) cs.dataset.v = ssh;
+    }
   };
 
   const refresh = async (probe) => {
@@ -699,12 +724,15 @@ esac
     const box = q('#ow_backups');
     if (!box) return;
     box.replaceChildren();
-    if (!list.length) { box.textContent = 'No backups yet.'; return; }
+    if (!list.length) { box.textContent = 'No backups yet. Stop the VM, then press Back up now.'; return; }
     list.forEach((b) => {
       const row = document.createElement('div');
-      row.className = 'ow-row ow-brow';
+      row.className = 'ow-r ow-brow';
       const label = document.createElement('span');
-      label.textContent = `${b.name.replace(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3 $4:$5:$6')}  ${fmtMb(b.kb)}  release ${b.release || '?'}`;
+      label.className = 'ow-bl';
+      label.textContent = `${b.name.replace(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3 $4:$5:$6')} · ${fmtMb(b.kb)} · release ${b.release || '?'}`;
+      const btns = document.createElement('span');
+      btns.className = 'ow-bs';
       const rs = document.createElement('button');
       rs.className = 'ow-act'; rs.textContent = 'Restore';
       rs.onclick = guarded(async () => {
@@ -714,13 +742,14 @@ esac
         toast('Backup restored', 'green', 4000);
       }, '…');
       const dl = document.createElement('button');
-      dl.className = 'ow-act'; dl.textContent = 'Delete';
+      dl.className = 'ow-act ow-ic'; dl.innerHTML = ico('trash'); dl.title = 'Delete backup'; dl.setAttribute('aria-label', 'Delete backup');
       dl.onclick = guarded(async () => {
         const o = await runRoot(mgr(`backup-del ${b.name}`));
         if (!o.ok) throw new Error(o.text);
         await fillBackups();
       }, '…');
-      row.append(label, rs, dl);
+      btns.append(rs, dl);
+      row.append(label, btns);
       box.appendChild(row);
     });
   };
@@ -729,34 +758,56 @@ esac
     document.getElementById(STYLE_ID)?.remove();
     const style = document.createElement('style');
     style.id = STYLE_ID;
+    const M = `#${MODAL_NAME}`;
     style.textContent = `
-      #${MODAL_NAME}{width:94vw !important}
-      #${MODAL_NAME} .ow-wrap{display:flex;flex-direction:column;gap:12px;max-height:72svh;overflow-y:auto;overflow-x:hidden;padding-bottom:24px;-webkit-overflow-scrolling:touch}
-      #${MODAL_NAME} .ow-card{padding:12px;border:1px solid rgba(255,255,255,.1);border-radius:14px;background:rgba(255,255,255,.045)}
-      #${MODAL_NAME} .ow-title{font-weight:800;font-size:.85rem;display:block;margin-bottom:6px}
-      #${MODAL_NAME} .ow-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
-      #${MODAL_NAME} .ow-note{opacity:.78;font-size:.72rem;margin-top:8px;line-height:1.4;overflow-wrap:anywhere}
-      #${MODAL_NAME} .ow-hero{padding:11px 14px;border-radius:12px;font-weight:800;font-size:.95rem;border:1px solid;overflow-wrap:anywhere}
-      #${MODAL_NAME} .ow-hero.on{color:#64e6a4;background:rgba(100,230,164,.1);border-color:rgba(100,230,164,.35)}
-      #${MODAL_NAME} .ow-hero.warn{color:#ffd76a;background:rgba(255,215,106,.1);border-color:rgba(255,215,106,.35)}
-      #${MODAL_NAME} .ow-hero.off{color:#ff8a8a;background:rgba(255,138,138,.1);border-color:rgba(255,138,138,.35)}
-      #${MODAL_NAME} .ow-pre{margin:8px 0 0;padding:9px 11px;border-radius:10px;background:rgba(0,0,0,.3);font:.62rem/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:40vh;overflow:auto}
-      #${MODAL_NAME} button{padding:6px 11px;border-radius:8px;font-size:.78rem;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
-      #${MODAL_NAME} button:disabled{opacity:.5}
-      #${MODAL_NAME} input[type=number],#${MODAL_NAME} input[type=text],#${MODAL_NAME} select{padding:7px 9px;border-radius:9px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.25);color:inherit;max-width:100%;box-sizing:border-box}
-      #${MODAL_NAME} input[type=number]{width:96px}
-      #${MODAL_NAME} label{display:flex;gap:8px;align-items:center;margin-top:8px;font-size:.82rem}
-      #${MODAL_NAME} .ow-tabs{display:flex;gap:6px;padding:4px;border-radius:12px;background:rgba(12,22,40,.95);border:1px solid rgba(255,255,255,.1)}
-      #${MODAL_NAME} .ow-tab{flex:1;opacity:.5;background:transparent !important;border:0;font-weight:800}
-      #${MODAL_NAME} .ow-tab.on{opacity:1;background:rgba(80,160,255,.2) !important}
-      #${MODAL_NAME} .ow-bar{height:8px;border-radius:6px;background:rgba(255,255,255,.12);overflow:hidden;margin-top:8px}
-      #${MODAL_NAME} .ow-bar > i{display:block;height:100%;width:0;background:#64a6ff;transition:width .3s}
-      #${MODAL_NAME} .ow-brow{justify-content:space-between}
-      #${MODAL_NAME} .ow-brow span{flex:1 1 100%;font-size:.74rem;overflow-wrap:anywhere}`;
+      ${M}{width:94vw !important}
+      ${M} .ow-wrap{display:flex;flex-direction:column;gap:8px;max-height:74svh;overflow-y:auto;overflow-x:hidden;padding-bottom:20px;-webkit-overflow-scrolling:touch;font-size:.8rem}
+      ${M} .ow-card{padding:9px 11px;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:rgba(255,255,255,.045)}
+      ${M} .ow-r{display:flex;align-items:center;justify-content:space-between;gap:8px}
+      ${M} .ow-r + .ow-r{margin-top:6px}
+      ${M} .ow-bs{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+      ${M} .ow-head{display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:12px;border:1px solid;--c:#ffd76a;color:var(--c);background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.14)}
+      ${M} .ow-head.on{--c:#64e6a4;background:rgba(100,230,164,.09);border-color:rgba(100,230,164,.35)}
+      ${M} .ow-head.warn{--c:#ffd76a;background:rgba(255,215,106,.09);border-color:rgba(255,215,106,.35)}
+      ${M} .ow-head.off{--c:#ff8a8a;background:rgba(255,138,138,.09);border-color:rgba(255,138,138,.35)}
+      ${M} .ow-dot{width:10px;height:10px;border-radius:50%;background:var(--c);flex:none}
+      ${M} .ow-ht{flex:1;min-width:0}
+      ${M} .ow-h1{font-weight:800;font-size:.92rem;overflow-wrap:anywhere}
+      ${M} .ow-sub{font-size:.68rem;opacity:.8;color:inherit;overflow-wrap:anywhere}
+      ${M} .ow-tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+      ${M} .ow-tile{padding:6px 9px;border-radius:9px;background:rgba(255,255,255,.06)}
+      ${M} .ow-tile small{display:block;font-size:.64rem;opacity:.65}
+      ${M} .ow-tile b{font-weight:800;font-size:.78rem;overflow-wrap:anywhere}
+      ${M} .ow-mono{font:.66rem ui-monospace,Menlo,Consolas,monospace;overflow-wrap:anywhere;min-width:0}
+      ${M} .ow-note{opacity:.72;font-size:.66rem;margin-top:6px;line-height:1.4;overflow-wrap:anywhere}
+      ${M} .ow-lbl{font-size:.66rem;opacity:.65;margin:8px 0 5px;display:block}
+      ${M} .ow-pre{margin:6px 0 0;padding:8px 10px;border-radius:9px;background:rgba(0,0,0,.3);font:.62rem/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:34vh;overflow:auto}
+      ${M} button{display:inline-flex;align-items:center;gap:4px;height:24px;min-height:24px;padding:2px 9px;border-radius:7px;font-size:.7rem;line-height:1;white-space:nowrap;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+      ${M} button.ow-ic{padding:2px 6px}
+      ${M} button.ow-pri{background:rgba(80,160,255,.28);font-weight:800}
+      ${M} button.ow-dng{color:#ff8a8a}
+      ${M} button:disabled{opacity:.5}
+      ${M} input[type=number],${M} input[type=text]{height:28px;padding:3px 8px;border-radius:8px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.25);color:inherit;width:100%;box-sizing:border-box;font-size:.75rem}
+      ${M} .ow-f{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 8px;margin-top:8px}
+      ${M} .ow-f label{display:block;margin:0;font-size:.64rem;opacity:.75}
+      ${M} .ow-f select{width:100%;height:28px;padding:3px 6px;border-radius:8px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.25);color:inherit;font-size:.75rem}
+      ${M} label.ow-sw{display:flex;gap:8px;align-items:center;margin-top:6px;font-size:.75rem}
+      ${M} details>summary{cursor:pointer;font-weight:800;font-size:.8rem;list-style:none}
+      ${M} details>summary::-webkit-details-marker{display:none}
+      ${M} details>summary::before{content:"\\25BE  "}
+      ${M} details:not([open])>summary::before{content:"\\25B8  "}
+      ${M} .ow-bar{height:5px;border-radius:4px;background:rgba(255,255,255,.12);overflow:hidden;margin-top:8px}
+      ${M} .ow-bar > i{display:block;height:100%;width:0;background:#64a6ff;transition:width .3s}
+      ${M} .ow-brow span.ow-bl{flex:1 1 auto;font-size:.68rem;overflow-wrap:anywhere;min-width:0}`;
     document.head.appendChild(style);
   };
 
-  const showLog = (text) => { const el = q('#ow_log'); if (el) { el.textContent = text || '(empty)'; el.style.display = ''; } };
+  const showLog = (text) => {
+    const el = q('#ow_log');
+    if (el) el.textContent = text || '(empty)';
+    const box = q('#ow_logbox');
+    if (box) box.style.display = '';
+  };
 
   const openModal = async () => {
     ensureStyle();
@@ -768,59 +819,69 @@ esac
       onClose: () => { if (timer) clearInterval(timer); timer = null; session += 1; return true; },
       content: `
         <div class="ow-wrap">
-          <div class="ow-tabs"><button type="button" class="ow-tab on" data-tab="main">Status</button><button type="button" class="ow-tab" data-tab="set">Settings</button><button type="button" class="ow-tab" data-tab="mnt">Maintenance</button></div>
-          <div data-pane="main">
-            <div id="ow_hero" class="ow-hero warn">● Checking…</div>
-            <div class="ow-card">
-              <div class="ow-row">
-                <button class="ow-act" id="ow_start">Start</button><button class="ow-act" id="ow_stop">Stop</button>
-                <button class="ow-act" id="ow_test">Test</button><button class="ow-act" id="ow_luci">Open LuCI</button>
-                <button class="ow-act" id="ow_join">Join hotspot</button><button class="ow-act" id="ow_unjoin">Leave hotspot</button>
-              </div>
-              <div id="ow_access" class="ow-note"></div>
-              <div id="ow_mem" class="ow-note"></div>
-              <div id="ow_rel" class="ow-note"></div>
-              <pre id="ow_log" class="ow-pre" style="display:none"></pre>
-            </div>
-            <div class="ow-row"><button class="ow-act" id="ow_refresh">Refresh</button><button class="ow-act" id="ow_logs">Show logs</button><button class="ow-act" id="ow_copy">Copy report</button></div>
+          <div id="ow_head" class="ow-head warn">
+            <span class="ow-dot"></span>
+            <div class="ow-ht"><div id="ow_hero" class="ow-h1">Checking…</div><div id="ow_sub" class="ow-sub"></div></div>
+            <button type="button" class="ow-act ow-ic" id="ow_refresh" aria-label="Refresh" title="Refresh">${ico('refresh')}</button>
           </div>
-          <div data-pane="set" style="display:none">
-            <div class="ow-card">
-              <span class="ow-title">Virtual machine</span>
-              <div class="ow-row"><span>CPUs</span><input type="number" id="ow_cpus" min="1" max="4"><span>Memory</span><select id="ow_mem_sel">${MEM_CHOICES.map((m) => `<option>${m}</option>`).join('')}</select></div>
-              <label><input type="checkbox" id="ow_boot"> Start with the phone</label>
-            </div>
-            <div class="ow-card">
-              <span class="ow-title">Network</span>
-              <label><input type="checkbox" id="ow_hotspot"> OpenWrt serves the hotspot (clients get 192.168.88.x from OpenWrt)</label>
-              <label><input type="checkbox" id="ow_expose"> Open LuCI/SSH from the hotspot (ports below, clients on 192.168.0.x)</label>
-              <div class="ow-row"><span>SSH port</span><input type="number" id="ow_ssh"><span>LuCI port</span><input type="number" id="ow_web"></div>
-              <div class="ow-row"><span>DNS</span><input type="text" id="ow_dns" style="width:130px"><span>Cellular</span><input type="text" id="ow_wan" style="width:120px"></div>
-              <div class="ow-note">A new OpenWrt disk has NO root password. Set one in LuCI (System > Administration) before you turn on either option above: anyone who can join the hotspot can reach SSH and LuCI. Changes apply at the next start.</div>
-            </div>
-            <div class="ow-row"><button class="ow-act" id="ow_save">Save</button></div>
+          <div class="ow-bs">
+            <button type="button" class="ow-act ow-pri" id="ow_start">${ico('play')}Start</button>
+            <button type="button" class="ow-act" id="ow_stop">${ico('stop')}Stop</button>
+            <button type="button" class="ow-act" id="ow_luci">${ico('ext')}LuCI</button>
+            <button type="button" class="ow-act" id="ow_test">${ico('act')}Test</button>
+            <button type="button" class="ow-act" id="ow_join">Join hotspot</button>
+            <button type="button" class="ow-act" id="ow_unjoin">Leave hotspot</button>
           </div>
-          <div data-pane="mnt" style="display:none">
-            <div class="ow-card">
-              <span class="ow-title">Install</span>
-              <div class="ow-note" id="ow_pinnote"></div>
-              <div class="ow-row"><button class="ow-act" id="ow_install">Install / reinstall ${esc(RELEASE_TAG)}</button><button class="ow-act" id="ow_checkup">Check for update</button><button class="ow-act" id="ow_rollback">Roll back</button></div>
-              <div class="ow-bar"><i id="ow_prog"></i></div>
-              <div class="ow-note" id="ow_prog_txt"></div>
-              <div class="ow-note">An install replaces the OpenWrt disk (and kernel). Export your OpenWrt settings first in LuCI (System > Backup). The previous release is kept for one roll back.</div>
-            </div>
-            <div class="ow-card">
-              <span class="ow-title">Backups of the OpenWrt disk</span>
-              <div class="ow-row"><button class="ow-act" id="ow_backup">Back up now</button></div>
-              <div id="ow_backups" class="ow-note"></div>
-              <div class="ow-note">The VM must be stopped. A backup only restores onto the same release.</div>
-            </div>
-            <div class="ow-card">
-              <span class="ow-title">Remove</span>
-              <div class="ow-row"><button class="ow-act" id="ow_remove">Remove from this device</button></div>
-              <div class="ow-note">Stops the VM, removes the boot entry and the VM files. Backups stay in ${esc(DIR)}/backup.</div>
-            </div>
+          <div id="ow_logbox" class="ow-card" style="display:none">
+            <div class="ow-r"><span class="ow-lbl" style="margin:0">Log</span><button type="button" id="ow_logx">Hide</button></div>
+            <pre id="ow_log" class="ow-pre"></pre>
           </div>
+          <div class="ow-tiles">
+            <div class="ow-tile"><small>VM</small><b id="ow_vm">–</b></div>
+            <div class="ow-tile"><small>Phone free memory</small><b id="ow_mem">–</b></div>
+            <div class="ow-tile"><small>Release</small><b id="ow_rel">–</b></div>
+            <div class="ow-tile"><small>Hotspot</small><b id="ow_hs">–</b></div>
+          </div>
+          <div class="ow-card" id="ow_accesscard" style="display:none">
+            <div class="ow-r"><span class="ow-mono" id="ow_access"></span><button type="button" class="ow-ic" id="ow_copy_luci" aria-label="Copy LuCI address" title="Copy LuCI address">${ico('copy')}</button></div>
+            <div class="ow-r"><span class="ow-mono" id="ow_ssh_txt"></span><button type="button" class="ow-ic" id="ow_copy_ssh" aria-label="Copy SSH address" title="Copy SSH address">${ico('copy')}</button></div>
+          </div>
+
+          <details class="ow-card" open>
+            <summary>Settings</summary>
+            <div class="ow-f">
+              <div><label for="ow_cpus">CPUs</label><input type="number" id="ow_cpus" min="1" max="4"></div>
+              <div><label for="ow_mem_sel">Memory</label><select id="ow_mem_sel">${MEM_CHOICES.map((m) => `<option>${m}</option>`).join('')}</select></div>
+              <div><label for="ow_ssh">SSH port</label><input type="number" id="ow_ssh"></div>
+              <div><label for="ow_web">LuCI port</label><input type="number" id="ow_web"></div>
+              <div><label for="ow_dns">DNS</label><input type="text" id="ow_dns"></div>
+              <div><label for="ow_wan">Cellular</label><input type="text" id="ow_wan"></div>
+            </div>
+            <label class="ow-sw"><input type="checkbox" id="ow_boot"> Start with the phone</label>
+            <label class="ow-sw"><input type="checkbox" id="ow_hotspot"> OpenWrt serves the hotspot (clients get 192.168.88.x)</label>
+            <label class="ow-sw"><input type="checkbox" id="ow_expose"> Open LuCI and SSH from the hotspot (clients on 192.168.0.x)</label>
+            <div class="ow-note">A new OpenWrt disk has NO root password. Set one in LuCI (System > Administration) before you turn on either hotspot option: anyone who can join the hotspot can reach SSH and LuCI. Changes apply at the next start.</div>
+            <div class="ow-r" style="margin-top:8px"><span></span><button type="button" class="ow-act ow-pri" id="ow_save">Save</button></div>
+          </details>
+
+          <details class="ow-card" open>
+            <summary>Maintenance</summary>
+            <span class="ow-lbl">Release</span>
+            <div class="ow-bs"><button type="button" class="ow-act" id="ow_install">Install</button><button type="button" class="ow-act" id="ow_checkup">Check</button><button type="button" class="ow-act" id="ow_rollback">Roll back</button></div>
+            <div class="ow-bar"><i id="ow_prog"></i></div>
+            <div class="ow-note" id="ow_prog_txt"></div>
+            <div class="ow-note" id="ow_pinnote"></div>
+            <div class="ow-note">An install replaces the OpenWrt disk (and kernel). Export your OpenWrt settings first in LuCI (System > Backup). The previous release is kept for one roll back.</div>
+            <span class="ow-lbl">Backups of the OpenWrt disk</span>
+            <div id="ow_backups" class="ow-note" style="margin-top:0"></div>
+            <div class="ow-r" style="margin-top:8px"><button type="button" class="ow-act" id="ow_backup">${ico('down')}Back up now</button><button type="button" class="ow-act ow-dng" id="ow_remove">Remove VM</button></div>
+            <div class="ow-note">Backups need the VM stopped and only restore onto the same release. Remove stops the VM and deletes the boot entry and VM files; backups stay in ${esc(DIR)}/backup.</div>
+          </details>
+
+          <details class="ow-card">
+            <summary>Logs and report</summary>
+            <div class="ow-bs" style="margin-top:8px"><button type="button" class="ow-act" id="ow_logs">Show logs</button><button type="button" class="ow-act" id="ow_copy">Copy report</button></div>
+          </details>
         </div>`,
     });
     if (!created?.id) throw new Error('createModal did not return a dialog (is the page fully loaded?)');
@@ -828,15 +889,13 @@ esac
     (modalApi ? modalApi.show : showModal)(created.id);
     setText('#ow_pinnote', PIN_SUMS_SHA256 ? `Pinned: only release ${RELEASE_TAG} with the checksum list ${PIN_SUMS_SHA256.slice(0, 12)}… is accepted.` : `Unpinned (development build): files are checked against the release's own SHA256SUMS only.`);
 
-    const tabs = modalEl.querySelectorAll('.ow-tab');
-    tabs.forEach((t) => {
-      t.onclick = () => {
-        tabs.forEach((x) => x.classList.toggle('on', x === t));
-        modalEl.querySelectorAll('[data-pane]').forEach((p) => { p.style.display = p.dataset.pane === t.dataset.tab ? '' : 'none'; });
-        if (t.dataset.tab === 'set') fillSettings().catch(() => {});
-        if (t.dataset.tab === 'mnt') fillBackups().catch(() => {});
-      };
-    });
+    q('#ow_logx').onclick = () => { const b = q('#ow_logbox'); if (b) b.style.display = 'none'; };
+    const copyText = async (v) => {
+      if (!v) return toast('Nothing to copy yet', 'orange', 3000);
+      try { await navigator.clipboard.writeText(v); toast('Copied', 'green', 2000); } catch (_) { toast(`Could not copy. Select it by hand: ${v}`, 'orange', 6000); }
+    };
+    q('#ow_copy_luci').onclick = () => copyText(q('#ow_copy_luci').dataset.v);
+    q('#ow_copy_ssh').onclick = () => copyText(q('#ow_copy_ssh').dataset.v);
 
     q('#ow_refresh').onclick = guarded(async () => { await refresh(true); }, '…');
     q('#ow_start').onclick = guarded(async () => {
@@ -930,6 +989,8 @@ esac
       return;
     }
     await refresh(true);
+    fillSettings().catch(() => {});
+    fillBackups().catch(() => {});
     const s = session;
     timer = setInterval(() => { if (s === session && busy === 0) refresh(false).catch(() => {}); }, 6000);
   };
