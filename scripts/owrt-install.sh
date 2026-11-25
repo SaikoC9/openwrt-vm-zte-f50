@@ -120,6 +120,29 @@ fetch() {
   mv -f "$2.part" "$2"
 }
 
+# mgr_check SCRIPT PROBE_DIR [VERSION]: the manager must parse in THIS device's sh and answer "state".
+# With VERSION it must also report installed=1 and that version (used after the swap). Sets MGR_ERR.
+mgr_check() {
+  MGR_ERR=
+  if ! sh -n "$1" >/dev/null 2>&1; then
+    MGR_ERR="owrt-vm.sh of this release does not parse in this device's sh ($(sh -n "$1" 2>&1 | head -n 1 | cut -c1-110)): a bug in the release, nothing was changed"
+    return 1
+  fi
+  mc_out=$(OWRT_DIR="$2" sh "$1" state 2>&1)
+  mc_rc=$?
+  if [ "$mc_rc" -ne 0 ] || ! printf '%s\n' "$mc_out" | grep -q '^installed='; then
+    MGR_ERR="owrt-vm.sh of this release does not run here (state failed: $(printf '%s' "$mc_out" | head -n 1 | cut -c1-110)): a bug in the release, nothing was changed"
+    return 1
+  fi
+  if [ -n "${3:-}" ]; then
+    printf '%s\n' "$mc_out" | grep -qx 'installed=1' && printf '%s\n' "$mc_out" | grep -qx "version=$3" || {
+      MGR_ERR="the new release does not report itself as installed after the swap; the previous release was put back"
+      return 1
+    }
+  fi
+  return 0
+}
+
 valid_args() {
   case $1 in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   case $2 in https://*) ;; file:///*) [ "$OWRT_TEST" = 1 ] || return 1 ;; *) return 1 ;; esac
@@ -215,6 +238,12 @@ do_run() {
   rm -rf "$TMP/x"
   rm -f "$TMP/$BUNDLE"
 
+  # 4b. the new manager must parse and run in this sh BEFORE anything in DIR is touched
+  PCT=93; setstate check "$PCT" "checking the new manager script"
+  rm -rf "$TMP/probe"; mkdir -p "$TMP/probe" || fail "cannot create $TMP/probe"
+  mgr_check "$TMP/owrt-vm.sh" "$TMP/probe" || { rm -rf "$TMP/probe"; for f in $FILES; do rm -f "$TMP/$f"; done; fail "$MGR_ERR"; }
+  rm -rf "$TMP/probe"
+
   # 5. swap: old release to prev/, new release in; undo on any failure
   vm_running && fail "the VM was started during the install: stop it and try again"
   PCT=95; setstate install "$PCT" "installing"
@@ -231,6 +260,8 @@ do_run() {
   chmod 755 "$DIR/owrt-vm.sh" "$DIR/cloud-hypervisor"
   chmod 644 "$DIR/Image" "$DIR/VERSION"
   chmod 600 "$DIR/rootfs.img"
+  # 5b. the installed manager must work with the installed files; if not, the old release comes back
+  mgr_check "$DIR/owrt-vm.sh" "$DIR" "$ver" || { undo_swap; fail "$MGR_ERR"; }
   rmdir "$PREV" 2>/dev/null
   rm -rf "$TMP"
   PCT=100; setstate done 100 "installed $ver"

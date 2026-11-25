@@ -239,4 +239,44 @@ ok "peek prints the release MANIFEST" 'grep -q "^version=1.0.0$" "$T/o" && grep 
 FAKE_CURL_FAIL=MANIFEST I peek "$URL1" >"$T/o" 2>&1; rc=$?
 ok "peek with an unreachable release fails" '[ $rc -ne 0 ]'
 
+
+# a release whose manager is broken must never replace a working install
+mkbad() { # NAME VERSION MANAGER_BODY: release with its own owrt-vm.sh, built with a copy of the release script
+  mkdir -p "$T/s_$1" && cp "$HERE"/owrt-release.sh "$HERE"/owrt-build.sh "$T/s_$1/" && printf '%s\n' "$3" > "$T/s_$1/owrt-vm.sh"
+  sed -i '/sh -n "\$HERE\/owrt-vm.sh"/d' "$T/s_$1/owrt-release.sh"
+  bash "$T/s_$1/owrt-release.sh" --build "$T/build3" --version "$2" --out "$T/rel_$1" >"$T/o" 2>&1
+}
+good_install() { rm -rf "$D"; I start v1.0.0 "$URL1" "$PIN1" >"$T/o" 2>&1; waitend; }
+untouched() { [ "$(cat "$D/VERSION")" = 1.0.0 ] && cmp -s "$D/Image" "$T/build/Image" && cmp -s "$D/rootfs.img" "$T/disk1.img" && cmp -s "$D/owrt-vm.sh" "$HERE/owrt-vm.sh" && [ ! -e "$D/prev" ]; }
+try() { # NAME VERSION: install the release built by mkbad
+  pin=$(sha256sum "$T/rel_$1/SHA256SUMS" | cut -d' ' -f1)
+  I start "v$2" "file://$T/rel_$1" "$pin" >"$T/o" 2>&1; waitend
+}
+
+mkbuild "$T/build3"
+good_install
+mkbad syn 1.0.1 'echo ok
+foo() { echo "${x%) *}"; 
+}}
+if ('
+try syn 1.0.1
+ok "a manager that does not parse is refused, the working install is untouched" '[ "$(sv phase)" = error ] && sv msg | grep -q "does not parse" && sv msg | grep -q "nothing was changed" && untouched'
+ok "a refused release leaves no staged files behind" '[ ! -e "$D/install/tmp/Image" ] && [ ! -e "$D/install/tmp/rootfs.img" ] && [ ! -e "$D/install/tmp/owrt-vm.sh" ]'
+
+good_install
+mkbad run 1.0.2 'echo "boom"; exit 3'
+try run 1.0.2
+ok "a manager that parses but cannot answer state is refused, install untouched" '[ "$(sv phase)" = error ] && sv msg | grep -q "does not run here" && untouched'
+
+good_install
+mkbad lie 1.0.3 'case $1 in state) echo installed=0; echo version= ;; *) echo hi ;; esac'
+try lie 1.0.3
+ok "a manager that passes the first check but does not see the installed release: old release put back" '[ "$(sv phase)" = error ] && sv msg | grep -q "previous release was put back" && untouched'
+
+# a good update still works after all that
+good_install
+I start v1.1.0 "file://$R4" "$PIN2" >"$T/o" 2>&1; waitend
+ok "a good update still installs with the manager checks on" '[ "$(sv phase)" = done ] && [ "$(cat "$D/VERSION")" = 1.1.0 ] && [ "$(cat "$D/prev/VERSION")" = 1.0.0 ]'
+rm -rf "$D"
+
 echo "passed $pass, failed $fail"; [ "$fail" -eq 0 ]
