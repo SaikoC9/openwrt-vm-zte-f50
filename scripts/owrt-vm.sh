@@ -479,7 +479,8 @@ cmd_check() {
     command -v "$c" >/dev/null 2>&1 && say "$c: $(command -v "$c")" || say "$c: MISSING"
   done
   command -v nc >/dev/null 2>&1 && say "nc: $(command -v nc)" || say "nc: MISSING (start cannot wait for LuCI, test cannot run)"
-  command -v gzip >/dev/null 2>&1 && say "gzip: $(command -v gzip)" || say "gzip: MISSING (the installer cannot unpack rootfs.img.gz; backups are stored uncompressed)"
+  command -v gzip >/dev/null 2>&1 && say "gzip: $(command -v gzip)" || say "gzip: MISSING (the installer cannot unpack the release; backups are stored uncompressed)"
+  command -v tar >/dev/null 2>&1 && say "tar: $(command -v tar)" || say "tar: MISSING (the installer cannot unpack the release)"
   ip link show dev "$WAN_IF" >/dev/null 2>&1 && say "cellular $WAN_IF: present" || say "cellular $WAN_IF: MISSING (no data connection?)"
   ip -4 addr show dev "$WAN_IF" 2>/dev/null | sed -n 's/^ *inet /  /p'
   say "ip_forward: $(cat "$IPF" 2>/dev/null)"

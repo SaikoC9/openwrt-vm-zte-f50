@@ -14,10 +14,11 @@
 #
 # Output (default dist/release/X.Y.Z/), upload every file to the GitHub release
 # tagged vX.Y.Z:
-#   owrt-vm.sh  cloud-hypervisor  Image  rootfs.img.gz  MANIFEST  SHA256SUMS
-# SHA256SUMS lists the five other files. The last line printed is the hash of
-# SHA256SUMS: paste it into the plugin as PIN_SUMS_SHA256, so the plugin only
-# installs this exact release.
+#   openwrt-vm-arm64.tar.gz  MANIFEST  SHA256SUMS
+# The tar.gz holds owrt-vm.sh, cloud-hypervisor, Image and rootfs.img (the same
+# inputs give the same file). SHA256SUMS lists MANIFEST and the tar.gz. The last
+# line printed is the hash of SHA256SUMS: paste it into the plugin as
+# PIN_SUMS_SHA256, so the plugin only installs this exact release.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,7 +47,7 @@ done
 [ -n "$OUT" ] || OUT="$ROOT/dist/release/$VERSION"
 case $OUT in /*) ;; *) OUT="$PWD/$OUT" ;; esac
 
-for t in sha256sum gzip; do command -v "$t" >/dev/null 2>&1 || die "$t not found"; done
+for t in sha256sum gzip tar; do command -v "$t" >/dev/null 2>&1 || die "$t not found"; done
 [ -d "$BUILD" ] || die "$BUILD is not a directory"
 [ -d "$GUEST" ] || die "$GUEST is not a directory"
 bash "$ROOT/scripts/owrt-build.sh" --verify "$BUILD" >/dev/null || die "$BUILD does not verify against its SHA256SUMS"
@@ -65,26 +66,29 @@ mkdir -p "$OUT"
 size() { wc -c < "$1" | tr -d ' '; }
 hash() { sha256sum "$1" | cut -d' ' -f1; }
 
-cp "$MGR" "$OUT/owrt-vm.sh"
-cp "$BUILD/cloud-hypervisor" "$OUT/cloud-hypervisor"
-cp "$GUEST/Image" "$OUT/Image"
-# -n: no name and timestamp in the header, so the same disk gives the same file
-gzip -9n -c "$GUEST/rootfs.img" > "$OUT/rootfs.img.gz"
-chmod 644 "$OUT"/*
+BUNDLE=openwrt-vm-arm64.tar.gz
+# Same inputs, same bytes: sorted names, fixed owner, time and mode, no name or time in the gzip header.
+# The files are linked in (tar -h follows the links), so the 50 MB disk is not copied first.
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+ln -s "$MGR" "$STAGE/owrt-vm.sh"
+ln -s "$BUILD/cloud-hypervisor" "$STAGE/cloud-hypervisor"
+ln -s "$GUEST/Image" "$STAGE/Image"
+ln -s "$GUEST/rootfs.img" "$STAGE/rootfs.img"
+( cd "$STAGE" && tar -h --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 --mode=644 -cf - Image cloud-hypervisor owrt-vm.sh rootfs.img ) | gzip -9n > "$OUT/$BUNDLE"
+[ "$(tar -tzf "$OUT/$BUNDLE" | sort | tr '\n' ' ')" = "Image cloud-hypervisor owrt-vm.sh rootfs.img " ] || die "internal error: the bundle does not hold the four files"
+chmod 644 "$OUT/$BUNDLE"
 
 {
   echo "version=$VERSION"
   echo "manager_api=$API"
   echo "rootfs_size=$(size "$GUEST/rootfs.img")"
   echo "rootfs_sha256=$(hash "$GUEST/rootfs.img")"
-  echo "size_owrt_vm_sh=$(size "$OUT/owrt-vm.sh")"
-  echo "size_cloud_hypervisor=$(size "$OUT/cloud-hypervisor")"
-  echo "size_Image=$(size "$OUT/Image")"
-  echo "size_rootfs_img_gz=$(size "$OUT/rootfs.img.gz")"
+  echo "size_openwrt_vm_arm64_tar_gz=$(size "$OUT/$BUNDLE")"
 } > "$OUT/MANIFEST"
 chmod 644 "$OUT/MANIFEST"
 
-( cd "$OUT" && sha256sum MANIFEST owrt-vm.sh cloud-hypervisor Image rootfs.img.gz > SHA256SUMS )
+( cd "$OUT" && sha256sum MANIFEST "$BUNDLE" > SHA256SUMS )
 chmod 644 "$OUT/SHA256SUMS"
 ( cd "$OUT" && sha256sum --quiet -c SHA256SUMS ) || die "internal error: SHA256SUMS does not match the files"
 

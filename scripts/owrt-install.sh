@@ -8,8 +8,8 @@
 #   sh owrt-install.sh peek BASE_URL                      print the release MANIFEST
 #   sh owrt-install.sh rollback                           swap with the previous release
 #
-# BASE_URL holds SHA256SUMS, MANIFEST, owrt-vm.sh, cloud-hypervisor, Image and
-# rootfs.img.gz (what scripts/owrt-release.sh writes). SHA256SUMS_SHA256 is the
+# BASE_URL holds SHA256SUMS, MANIFEST and openwrt-vm-arm64.tar.gz (owrt-vm.sh,
+# cloud-hypervisor, Image and rootfs.img), what scripts/owrt-release.sh writes. SHA256SUMS_SHA256 is the
 # hash the plugin has pinned for that file; without it the download is only
 # checked against the SHA256SUMS of the same server (reported as "unpinned").
 #
@@ -33,6 +33,7 @@ LOCK=$WORK/lock
 LOG=$WORK/install.log
 PREV=$DIR/prev
 MIN_FREE_KB=${MIN_FREE_KB:-200000}
+BUNDLE=openwrt-vm-arm64.tar.gz
 FILES="owrt-vm.sh cloud-hypervisor Image rootfs.img VERSION"
 case $0 in /*) SELF=$0 ;; *) SELF=$PWD/$0 ;; esac
 
@@ -174,42 +175,45 @@ do_run() {
   [ "v$ver" = "$TAG" ] || [ "$ver" = "$TAG" ] || fail "MANIFEST says version $ver, not $TAG"
   [ "$(mget manager_api)" = "$API" ] || fail "this release needs manager API $(mget manager_api), the plugin supports $API: update the plugin"
 
-  # 3. downloads, each checked against the list
-  total=0
-  for n in owrt-vm.sh cloud-hypervisor Image rootfs.img.gz; do
-    sz=$(mget "size_$(key_of "$n")")
-    case $sz in ''|*[!0-9]*) fail "MANIFEST has no size for $n" ;; esac
-    total=$((total + sz / 1024))
-  done
+  # 3. the bundle (manager, VMM, kernel and disk in one tar.gz), checked against the list
+  want=$(sum_of "$BUNDLE")
+  [ -n "$want" ] || fail "SHA256SUMS has no entry for $BUNDLE"
+  sz=$(mget "size_$(key_of "$BUNDLE")")
+  case $sz in ''|*[!0-9]*) fail "MANIFEST has no size for $BUNDLE" ;; esac
+  total=$((sz / 1024))
   [ "$total" -gt 0 ] || total=1
-  done_kb=0
-  for n in owrt-vm.sh cloud-hypervisor Image rootfs.img.gz; do
-    want=$(sum_of "$n")
-    [ -n "$want" ] || fail "SHA256SUMS has no entry for $n"
-    sz=$(mget "size_$(key_of "$n")")
-    if [ -f "$TMP/$n" ] && [ "$(bsum "$TMP/$n")" = "$want" ]; then
-      say "$n already downloaded and verified"
-    else
-      rm -f "$TMP/$n"
-      setstate download "$PCT" "downloading $n" "$n"
-      fetch "$BASE/$n" "$TMP/$n" "$n" "$sz" "$done_kb" "$total" ||
-        fail "download of $n failed ($(head -c 120 "$WORK/curl.err" 2>/dev/null))"
-      [ "$(bsum "$TMP/$n")" = "$want" ] || { rm -f "$TMP/$n"; fail "$n does not match SHA256SUMS (corrupt download, try again)"; }
-    fi
-    done_kb=$((done_kb + sz / 1024))
-    PCT=$((done_kb * 85 / total))
-  done
+  if [ -f "$TMP/$BUNDLE" ] && [ "$(bsum "$TMP/$BUNDLE")" = "$want" ]; then
+    say "$BUNDLE already downloaded and verified"
+  else
+    rm -f "$TMP/$BUNDLE"
+    setstate download "$PCT" "downloading $BUNDLE" "$BUNDLE"
+    fetch "$BASE/$BUNDLE" "$TMP/$BUNDLE" "$BUNDLE" "$sz" 0 "$total" ||
+      fail "download of $BUNDLE failed ($(head -c 120 "$WORK/curl.err" 2>/dev/null))"
+    [ "$(bsum "$TMP/$BUNDLE")" = "$want" ] || { rm -f "$TMP/$BUNDLE"; fail "$BUNDLE does not match SHA256SUMS (corrupt download, try again)"; }
+  fi
+  PCT=85
 
-  # 4. unpack the disk and check it against the manifest
-  PCT=88; setstate unpack "$PCT" "unpacking the OpenWrt disk" rootfs.img
-  unz "$TMP/rootfs.img.gz" > "$TMP/rootfs.img.part"
-  urc=$?
-  [ "$urc" -eq 127 ] && { rm -f "$TMP/rootfs.img.part"; fail "no gzip/zcat on this device: cannot unpack rootfs.img.gz"; }
-  [ "$urc" -eq 0 ] || { rm -f "$TMP/rootfs.img.part"; fail "unpacking failed (disk full?)"; }
-  mv -f "$TMP/rootfs.img.part" "$TMP/rootfs.img"
-  [ "$(wc -c < "$TMP/rootfs.img")" = "$(mget rootfs_size)" ] || { rm -f "$TMP/rootfs.img"; fail "unpacked disk has the wrong size"; }
-  [ "$(bsum "$TMP/rootfs.img")" = "$(mget rootfs_sha256)" ] || { rm -f "$TMP/rootfs.img"; fail "unpacked disk does not match the manifest"; }
-  rm -f "$TMP/rootfs.img.gz"
+  # 4. unpack: the file list is checked first (only the four known names), then the disk against the manifest
+  PCT=88; setstate unpack "$PCT" "unpacking the release" "$BUNDLE"
+  command -v tar >/dev/null 2>&1 || fail "no tar on this device: cannot unpack $BUNDLE"
+  unz "$TMP/$BUNDLE" 2>/dev/null | tar -tf - > "$WORK/bundle.list" 2>/dev/null
+  [ -s "$WORK/bundle.list" ] || fail "cannot read $BUNDLE (no gzip or tar on this device, or the file is damaged)"
+  while read -r bl; do
+    case ${bl#./} in owrt-vm.sh|cloud-hypervisor|Image|rootfs.img) ;; *) fail "unexpected entry in $BUNDLE: $bl" ;; esac
+  done < "$WORK/bundle.list"
+  for f in owrt-vm.sh cloud-hypervisor Image rootfs.img; do
+    grep -qx -e "$f" -e "./$f" "$WORK/bundle.list" || fail "$BUNDLE has no $f"
+  done
+  rm -rf "$TMP/x"; mkdir -p "$TMP/x" || fail "cannot create $TMP/x"
+  unz "$TMP/$BUNDLE" | tar -xf - -C "$TMP/x" || { rm -rf "$TMP/x"; fail "unpacking failed (disk full?)"; }
+  for f in owrt-vm.sh cloud-hypervisor Image rootfs.img; do
+    [ -f "$TMP/x/$f" ] && [ ! -L "$TMP/x/$f" ] && [ -s "$TMP/x/$f" ] || { rm -rf "$TMP/x"; fail "$f was not unpacked"; }
+  done
+  [ "$(wc -c < "$TMP/x/rootfs.img")" = "$(mget rootfs_size)" ] || { rm -rf "$TMP/x"; fail "unpacked disk has the wrong size"; }
+  [ "$(bsum "$TMP/x/rootfs.img")" = "$(mget rootfs_sha256)" ] || { rm -rf "$TMP/x"; fail "unpacked disk does not match the manifest"; }
+  for f in owrt-vm.sh cloud-hypervisor Image rootfs.img; do mv -f "$TMP/x/$f" "$TMP/$f" || fail "cannot stage $f"; done
+  rm -rf "$TMP/x"
+  rm -f "$TMP/$BUNDLE"
 
   # 5. swap: old release to prev/, new release in; undo on any failure
   vm_running && fail "the VM was started during the install: stop it and try again"

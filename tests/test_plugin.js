@@ -165,11 +165,11 @@ const ctx = vm.createContext({ window: win, btoa: (s) => Buffer.from(s, 'binary'
   fs.writeFileSync(path.join(DIR, 'owrt-vm.sh'), real, { mode: 0o755 });
 
   // ---- install errors surface as exceptions with the installer's message
-  fs.rmSync(path.join(rel, 'Image'));
+  fs.rmSync(path.join(rel, 'openwrt-vm-arm64.tar.gz'));
   fs.rmSync(path.join(DIR, 'install'), { recursive: true, force: true });
   let msg = '';
   try { await A.installRelease(); } catch (e) { msg = e.message; }
-  ok('installRelease: a missing release file throws with the file name', /download of Image failed/.test(msg));
+  ok('installRelease: a missing release bundle throws with the file name', /download of openwrt-vm-arm64.tar.gz failed/.test(msg));
 
   console.log(`passed ${pass}, failed ${fail}`);
   process.exit(fail ? 1 : 0);

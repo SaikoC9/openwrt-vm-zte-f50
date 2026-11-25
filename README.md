@@ -7,7 +7,7 @@ piece is built from source. Used by MatchiTOOL.
 
 MatchiTOOL plugin: `plugin/OpenWrt_VM_v1_0.js`. Release flow:
 
-    scripts/owrt-release.sh --build dist/owrt --guest dist/guest --version 1.0.0   # writes the six release files
+    scripts/owrt-release.sh --build dist/owrt --guest dist/guest --version 1.0.0   # writes the release (openwrt-vm-arm64.tar.gz, MANIFEST, SHA256SUMS)
     # upload them to the GitHub release v1.0.0, paste the printed PIN_SUMS_SHA256 into the plugin
 
 Tests: `bash scripts/test_owrt_vm.sh`, `bash scripts/test_owrt_install.sh`,

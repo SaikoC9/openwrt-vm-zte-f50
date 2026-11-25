@@ -4,7 +4,7 @@
 # copies from the release folder. Run by hand: bash scripts/test_owrt_install.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-for t in sha256sum gzip setsid; do
+for t in sha256sum gzip tar setsid; do
   command -v "$t" >/dev/null 2>&1 || { echo "skipped: owrt install test ($t missing)"; exit 0; }
 done
 
@@ -49,11 +49,11 @@ mkbuild "$T/build"
 cp "$T/build/rootfs.img" "$T/disk1.img"
 R1="$T/rel1"
 bash "$HERE/owrt-release.sh" --build "$T/build" --version 1.0.0 --out "$R1" > "$T/rel1.out" 2>&1
-ok "release: writes the six assets" '[ "$(ls "$R1" | wc -l)" = 6 ] && for f in owrt-vm.sh cloud-hypervisor Image rootfs.img.gz MANIFEST SHA256SUMS; do [ -s "$R1/$f" ] || exit 1; done'
-ok "release: SHA256SUMS checks out and lists the five files" '(cd "$R1" && sha256sum --quiet -c SHA256SUMS) && [ "$(wc -l < "$R1/SHA256SUMS")" = 5 ] && grep -q " MANIFEST$" "$R1/SHA256SUMS"'
-ok "release: MANIFEST has version, API, sizes and the disk hash" 'grep -q "^version=1.0.0$" "$R1/MANIFEST" && grep -q "^manager_api=1$" "$R1/MANIFEST" && grep -q "^rootfs_sha256=$(sha256sum "$T/build/rootfs.img" | cut -d" " -f1)$" "$R1/MANIFEST" && grep -q "^size_Image=300000$" "$R1/MANIFEST" && grep -q "^rootfs_size=2000000$" "$R1/MANIFEST"'
+ok "release: writes the three assets" '[ "$(ls "$R1" | wc -l)" = 3 ] && for f in openwrt-vm-arm64.tar.gz MANIFEST SHA256SUMS; do [ -s "$R1/$f" ] || exit 1; done'
+ok "release: SHA256SUMS checks out and lists MANIFEST and the bundle" '(cd "$R1" && sha256sum --quiet -c SHA256SUMS) && [ "$(wc -l < "$R1/SHA256SUMS")" = 2 ] && grep -q " MANIFEST$" "$R1/SHA256SUMS" && grep -q " openwrt-vm-arm64.tar.gz$" "$R1/SHA256SUMS"'
+ok "release: MANIFEST has version, API, sizes and the disk hash" 'grep -q "^version=1.0.0$" "$R1/MANIFEST" && grep -q "^manager_api=1$" "$R1/MANIFEST" && grep -q "^rootfs_sha256=$(sha256sum "$T/build/rootfs.img" | cut -d" " -f1)$" "$R1/MANIFEST" && grep -q "^size_openwrt_vm_arm64_tar_gz=$(wc -c < "$R1/openwrt-vm-arm64.tar.gz" | tr -d " ")$" "$R1/MANIFEST" && grep -q "^rootfs_size=2000000$" "$R1/MANIFEST"'
 ok "release: prints the pin line for the plugin" 'grep -q "^PIN_SUMS_SHA256=$(sha256sum "$R1/SHA256SUMS" | cut -d" " -f1)$" "$T/rel1.out"'
-ok "release: the disk is compressed" '[ "$(wc -c < "$R1/rootfs.img.gz")" -lt 1000000 ]'
+ok "release: the bundle is compressed and holds exactly the four files" '[ "$(wc -c < "$R1/openwrt-vm-arm64.tar.gz")" -lt 1000000 ] && [ "$(tar -tzf "$R1/openwrt-vm-arm64.tar.gz" | sort | tr "\n" " ")" = "Image cloud-hypervisor owrt-vm.sh rootfs.img " ]'
 PIN1=$(sha256sum "$R1/SHA256SUMS" | cut -d' ' -f1)
 bash "$HERE/owrt-release.sh" --build "$T/build" --version 1.0.0 --out "$R1" >"$T/o" 2>&1
 ok "release: refuses to overwrite a release folder" '[ $? -ne 0 ] || grep -q "not empty" "$T/o"'
@@ -69,7 +69,7 @@ mkdir -p "$T/hostdir" "$T/guestdir"
 cp "$T/build/cloud-hypervisor" "$T/hostdir/"; cp "$T/build/Image" "$T/build/rootfs.img" "$T/guestdir/"
 ( cd "$T/hostdir" && sha256sum cloud-hypervisor > SHA256SUMS ); ( cd "$T/guestdir" && sha256sum Image rootfs.img > SHA256SUMS )
 bash "$HERE/owrt-release.sh" --build "$T/hostdir" --guest "$T/guestdir" --version 1.0.0 --out "$T/relsplit" >"$T/o" 2>&1
-ok "release from separate host and guest folders gives the same files as from one folder" 'cmp -s "$T/relsplit/Image" "$R1/Image" && cmp -s "$T/relsplit/rootfs.img.gz" "$R1/rootfs.img.gz" && cmp -s "$T/relsplit/MANIFEST" "$R1/MANIFEST" && cmp -s "$T/relsplit/SHA256SUMS" "$R1/SHA256SUMS"'
+ok "release from separate host and guest folders gives the same files as from one folder (same inputs, same bytes)" 'cmp -s "$T/relsplit/openwrt-vm-arm64.tar.gz" "$R1/openwrt-vm-arm64.tar.gz" && cmp -s "$T/relsplit/MANIFEST" "$R1/MANIFEST" && cmp -s "$T/relsplit/SHA256SUMS" "$R1/SHA256SUMS"'
 echo x >> "$T/guestdir/Image"
 bash "$HERE/owrt-release.sh" --build "$T/hostdir" --guest "$T/guestdir" --version 1.0.0 --out "$T/relsplit2" >"$T/o" 2>&1
 ok "release refuses a guest folder that does not match its SHA256SUMS" 'grep -q "guestdir does not verify" "$T/o"'
@@ -87,7 +87,7 @@ URL1="file://$R1"
 ok "status before any install: phase=none" '[ "$(sv phase)" = none ]'
 I start v1.0.0 "$URL1" "$PIN1" >"$T/o" 2>&1; waitend
 ok "install with the pinned hash: done" '[ "$(sv phase)" = done ] && [ "$(sv pct)" = 100 ] && [ "$(sv unpinned)" = 0 ]'
-ok "installed files: right content, modes, VERSION last" '[ "$(cat "$D/VERSION")" = 1.0.0 ] && cmp -s "$D/Image" "$R1/Image" && cmp -s "$D/rootfs.img" "$T/disk1.img" && cmp -s "$D/cloud-hypervisor" "$R1/cloud-hypervisor" && [ -x "$D/owrt-vm.sh" ] && [ -x "$D/cloud-hypervisor" ] && sh -n "$D/owrt-vm.sh"'
+ok "installed files: right content, modes, VERSION last" '[ "$(cat "$D/VERSION")" = 1.0.0 ] && cmp -s "$D/Image" "$T/build/Image" && cmp -s "$D/rootfs.img" "$T/disk1.img" && cmp -s "$D/cloud-hypervisor" "$T/build/cloud-hypervisor" && cmp -s "$D/owrt-vm.sh" "$HERE/owrt-vm.sh" && [ -x "$D/owrt-vm.sh" ] && [ -x "$D/cloud-hypervisor" ] && sh -n "$D/owrt-vm.sh"'
 ok "install leaves no temp files, no lock, no prev (first install)" '[ ! -e "$D/install/tmp" ] && [ ! -e "$D/install/lock" ] && [ ! -e "$D/prev" ]'
 
 # wrong pin
@@ -101,17 +101,44 @@ ok "no pin: installs and reports unpinned=1" '[ "$(sv phase)" = done ] && [ "$(s
 
 # corrupt download, then retry
 rm -rf "$D"; : > "$FAKE_CURL_LOG"
-FAKE_CURL_CORRUPT=Image I start v1.0.0 "$URL1" "$PIN1" >"$T/o" 2>&1; waitend
-ok "corrupt Image: refused, nothing installed" '[ "$(sv phase)" = error ] && sv msg | grep -q "Image does not match SHA256SUMS" && [ ! -e "$D/Image" ] && [ ! -e "$D/VERSION" ]'
-ok "verified downloads are kept for the retry" '[ -s "$D/install/tmp/owrt-vm.sh" ] && [ -s "$D/install/tmp/cloud-hypervisor" ]'
-: > "$FAKE_CURL_LOG"
+FAKE_CURL_CORRUPT=openwrt-vm-arm64.tar.gz I start v1.0.0 "$URL1" "$PIN1" >"$T/o" 2>&1; waitend
+ok "corrupt bundle: refused, nothing installed, bad file removed" '[ "$(sv phase)" = error ] && sv msg | grep -q "openwrt-vm-arm64.tar.gz does not match SHA256SUMS" && [ ! -e "$D/Image" ] && [ ! -e "$D/VERSION" ] && [ ! -e "$D/install/tmp/openwrt-vm-arm64.tar.gz" ]'
+# a verified bundle left in install/tmp by an interrupted install is reused
+rm -rf "$D"; mkdir -p "$D/install/tmp"; cp "$R1/openwrt-vm-arm64.tar.gz" "$D/install/tmp/"; : > "$FAKE_CURL_LOG"
 I start v1.0.0 "$URL1" "$PIN1" >"$T/o" 2>&1; waitend
-ok "retry succeeds and does not fetch the verified files again" '[ "$(sv phase)" = done ] && ! grep -q "/owrt-vm.sh$" "$FAKE_CURL_LOG" && ! grep -q "/cloud-hypervisor$" "$FAKE_CURL_LOG" && grep -q "/Image$" "$FAKE_CURL_LOG"'
+ok "a verified bundle is not downloaded again" '[ "$(sv phase)" = done ] && ! grep -q "openwrt-vm-arm64.tar.gz$" "$FAKE_CURL_LOG" && grep -q "/MANIFEST$" "$FAKE_CURL_LOG"'
+
+# a bundle with an unexpected entry (hash and list are right, so only the content check can stop it)
+R5="$T/rel_extra"; mkdir -p "$R5" "$T/x5"
+cp "$R1/MANIFEST" "$R5/"
+cp "$T/build/Image" "$T/build/rootfs.img" "$T/build/cloud-hypervisor" "$T/x5/"; cp "$HERE/owrt-vm.sh" "$T/x5/"; echo evil > "$T/x5/evil"
+( cd "$T/x5" && tar -cf - Image cloud-hypervisor owrt-vm.sh rootfs.img evil | gzip -9n > "$R5/openwrt-vm-arm64.tar.gz" )
+sed -i "s/^size_openwrt_vm_arm64_tar_gz=.*/size_openwrt_vm_arm64_tar_gz=$(wc -c < "$R5/openwrt-vm-arm64.tar.gz" | tr -d ' ')/" "$R5/MANIFEST"
+( cd "$R5" && sha256sum MANIFEST openwrt-vm-arm64.tar.gz > SHA256SUMS )
+rm -rf "$D"
+I start v1.0.0 "file://$R5" >"$T/o" 2>&1; waitend
+ok "a bundle with an unexpected entry is refused, nothing installed" '[ "$(sv phase)" = error ] && sv msg | grep -q "unexpected entry" && [ ! -e "$D/Image" ] && [ ! -e "$D/VERSION" ]'
+# a bundle whose disk is not the one in the manifest
+R6="$T/rel_baddisk"; mkdir -p "$R6" "$T/x6"
+cp "$R1/MANIFEST" "$R6/"; cp "$T/build/Image" "$T/build/cloud-hypervisor" "$HERE/owrt-vm.sh" "$T/x6/"; head -c 2000000 /dev/zero > "$T/x6/rootfs.img"
+( cd "$T/x6" && tar -cf - Image cloud-hypervisor owrt-vm.sh rootfs.img | gzip -9n > "$R6/openwrt-vm-arm64.tar.gz" )
+sed -i "s/^size_openwrt_vm_arm64_tar_gz=.*/size_openwrt_vm_arm64_tar_gz=$(wc -c < "$R6/openwrt-vm-arm64.tar.gz" | tr -d ' ')/" "$R6/MANIFEST"
+( cd "$R6" && sha256sum MANIFEST openwrt-vm-arm64.tar.gz > SHA256SUMS )
+rm -rf "$D"
+I start v1.0.0 "file://$R6" >"$T/o" 2>&1; waitend
+ok "a disk that does not match the manifest is refused, nothing installed" '[ "$(sv phase)" = error ] && sv msg | grep -q "does not match the manifest" && [ ! -e "$D/rootfs.img" ] && [ ! -e "$D/VERSION" ]'
+# a file that is not a gzip tar
+R7="$T/rel_notgz"; cp -r "$R1" "$R7"; echo "not a tar" > "$R7/openwrt-vm-arm64.tar.gz"
+sed -i "s/^size_openwrt_vm_arm64_tar_gz=.*/size_openwrt_vm_arm64_tar_gz=10/" "$R7/MANIFEST"
+( cd "$R7" && sha256sum MANIFEST openwrt-vm-arm64.tar.gz > SHA256SUMS )
+rm -rf "$D"
+I start v1.0.0 "file://$R7" >"$T/o" 2>&1; waitend
+ok "a bundle that cannot be read is refused" '[ "$(sv phase)" = error ] && sv msg | grep -q "cannot read" && [ ! -e "$D/Image" ]'
 
 # missing file on the server
 rm -rf "$D"
-FAKE_CURL_FAIL=rootfs.img.gz I start v1.0.0 "$URL1" "$PIN1" >"$T/o" 2>&1; waitend
-ok "download error is reported with the file name" '[ "$(sv phase)" = error ] && sv msg | grep -q "download of rootfs.img.gz failed" && [ ! -e "$D/Image" ]'
+FAKE_CURL_FAIL=openwrt-vm-arm64.tar.gz I start v1.0.0 "$URL1" "$PIN1" >"$T/o" 2>&1; waitend
+ok "download error is reported with the file name" '[ "$(sv phase)" = error ] && sv msg | grep -q "download of openwrt-vm-arm64.tar.gz failed" && [ ! -e "$D/Image" ]'
 
 # tag that does not match the manifest
 rm -rf "$D"
@@ -121,7 +148,7 @@ ok "tag/manifest mismatch is refused" '[ "$(sv phase)" = error ] && sv msg | gre
 # newer manager API
 R2="$T/rel_api2"; cp -r "$R1" "$R2"
 sed -i 's/^manager_api=1$/manager_api=2/' "$R2/MANIFEST"
-( cd "$R2" && sha256sum MANIFEST owrt-vm.sh cloud-hypervisor Image rootfs.img.gz > SHA256SUMS )
+( cd "$R2" && sha256sum MANIFEST openwrt-vm-arm64.tar.gz > SHA256SUMS )
 rm -rf "$D"
 I start v1.0.0 "file://$R2" >"$T/o" 2>&1; waitend
 ok "a release that needs a newer manager API says: update the plugin" '[ "$(sv phase)" = error ] && sv msg | grep -q "update the plugin"'
@@ -168,11 +195,11 @@ R4="$T/rel2"
 bash "$HERE/owrt-release.sh" --build "$T/build2" --version 1.1.0 --out "$R4" >"$T/o" 2>&1
 PIN2=$(sha256sum "$R4/SHA256SUMS" | cut -d' ' -f1)
 I start v1.1.0 "file://$R4" "$PIN2" >"$T/o" 2>&1; waitend
-ok "update installs the new release" '[ "$(sv phase)" = done ] && [ "$(cat "$D/VERSION")" = 1.1.0 ] && cmp -s "$D/Image" "$R4/Image" && cmp -s "$D/rootfs.img" "$T/build2/rootfs.img"'
-ok "update keeps the old release in prev/" '[ "$(cat "$D/prev/VERSION")" = 1.0.0 ] && cmp -s "$D/prev/Image" "$R1/Image" && cmp -s "$D/prev/rootfs.img" "$T/disk1.img"'
+ok "update installs the new release" '[ "$(sv phase)" = done ] && [ "$(cat "$D/VERSION")" = 1.1.0 ] && cmp -s "$D/Image" "$T/build2/Image" && cmp -s "$D/rootfs.img" "$T/build2/rootfs.img"'
+ok "update keeps the old release in prev/" '[ "$(cat "$D/prev/VERSION")" = 1.0.0 ] && cmp -s "$D/prev/Image" "$T/build/Image" && cmp -s "$D/prev/rootfs.img" "$T/disk1.img"'
 ok "update does not touch vm.conf and backup/" '[ "$(cat "$D/vm.conf")" = CPUS=3 ] && [ -d "$D/backup/20260101-000001" ]'
 I rollback >"$T/o" 2>&1
-ok "rollback brings 1.0.0 back and keeps 1.1.0 in prev/" '[ "$(cat "$D/VERSION")" = 1.0.0 ] && cmp -s "$D/Image" "$R1/Image" && [ "$(cat "$D/prev/VERSION")" = 1.1.0 ] && [ "$(cat "$D/vm.conf")" = CPUS=3 ]'
+ok "rollback brings 1.0.0 back and keeps 1.1.0 in prev/" '[ "$(cat "$D/VERSION")" = 1.0.0 ] && cmp -s "$D/Image" "$T/build/Image" && [ "$(cat "$D/prev/VERSION")" = 1.1.0 ] && [ "$(cat "$D/vm.conf")" = CPUS=3 ]'
 I rollback >"$T/o" 2>&1
 ok "a second rollback rolls forward again" '[ "$(cat "$D/VERSION")" = 1.1.0 ] && cmp -s "$D/rootfs.img" "$T/build2/rootfs.img"'
 rm -rf "$D/prev"
@@ -186,9 +213,9 @@ kill "$vmpid" 2>/dev/null; wait "$vmpid" 2>/dev/null
 rm -rf "$D"
 
 # progress and cancel (slow rootfs download)
-FAKE_CURL_SLOWFILE=rootfs.img.gz FAKE_CURL_SLOW=4 I start v1.0.0 "$URL1" "$PIN1" >"$T/o" 2>&1
-for _ in $(seq 1 20); do [ "$(sv file)" = rootfs.img.gz ] && break; sleep 0.5; done
-ok "while downloading: phase=download, alive=1, file name shown" '[ "$(sv phase)" = download ] && [ "$(sv alive)" = 1 ] && [ "$(sv file)" = rootfs.img.gz ]'
+FAKE_CURL_SLOWFILE=openwrt-vm-arm64.tar.gz FAKE_CURL_SLOW=4 I start v1.0.0 "$URL1" "$PIN1" >"$T/o" 2>&1
+for _ in $(seq 1 20); do [ "$(sv file)" = openwrt-vm-arm64.tar.gz ] && break; sleep 0.5; done
+ok "while downloading: phase=download, alive=1, file name shown" '[ "$(sv phase)" = download ] && [ "$(sv alive)" = 1 ] && [ "$(sv file)" = openwrt-vm-arm64.tar.gz ]'
 I start v1.0.0 "$URL1" "$PIN1" >"$T/o" 2>&1; rc=$?
 ok "a second install while one runs is refused" '[ $rc -ne 0 ] && grep -q "already running" "$T/o"'
 I cancel >"$T/o" 2>&1
