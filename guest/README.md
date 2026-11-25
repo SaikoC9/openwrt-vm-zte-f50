@@ -15,7 +15,7 @@ The OpenWrt guest, built from source: kernel `Image` and `rootfs.img`.
 ## Build
 
 Needs the OpenWrt build dependencies, a non-root user and about 15-25 GB of disk.
-The CI workflow `build-owrt-guest.yml` does all of it (1.5-3 h). Locally:
+The CI workflow `release-owrt-vm.yml` does all of it (about 1 h). Locally:
 
     OWRT_GUEST_WORK=/big/disk/owrt-work guest/build.sh dist/guest
 
