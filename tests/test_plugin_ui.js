@@ -43,7 +43,8 @@ const src = fs.readFileSync(path.join(root, 'plugin', 'OpenWrt_VM_v1_0.js'), 'ut
   .split('/data/local/matchitool/boot.d/30-openwrt-vm.sh').join(BOOT)
   .split('/data/data/com.matchi.tool/files/curl').join(CURL)
   .replace('https://github.com/${REPO}/releases/download/${RELEASE_TAG}', `file://${rel}`)
-  .replace('https://github.com/${REPO}/releases/latest/download', `file://${rel}`);
+  .replace('https://github.com/${REPO}/releases/latest/download', `file://${rel}`)
+  .replace('https://github.com/${REPO}/releases/download/${tag}', `file://${rel}`);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
@@ -86,12 +87,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // install through the window
   ok('everything is on one screen: settings and maintenance are open, no tabs', await page.$$eval('#matchi_owrt_modal details[open]', (d) => d.length) === 2 && !(await page.$('#matchi_owrt_modal .ow-tab')));
-  ok('the pinned/unpinned note is shown', /Unpinned/.test(await text('#ow_pinnote')));
+  ok('the latest-release note is shown', /latest/i.test(await text('#ow_pinnote')));
   await click('#ow_install');
   const stopped = await waitText('#ow_hero', /Stopped/, 30000);
   ok('Install: the window ends on "Stopped" and the files are on disk', /Stopped/.test(stopped) && fs.existsSync(path.join(DIR, 'rootfs.img')) && fs.readFileSync(path.join(DIR, 'VERSION'), 'utf8').trim() === '1.0.0');
   ok('Install: a toast said it was installed (unpinned warning)', (await page.evaluate(() => window.__toasts)).some((t) => /Installed v1\.0\.0/.test(t)));
-  ok('the Release tile shows the installed release and the button says Reinstall', /^1\.0\.0 · unpinned$/.test(await text('#ow_rel')) && (await text('#ow_install')) === 'Reinstall');
+  ok('the Release tile shows the installed release and the button says Reinstall', /^1\.0\.0$/.test(await text('#ow_rel')) && (await text('#ow_install')) === 'Reinstall');
   ok('after install: Start is visible, Stop and Test are hidden', await page.$eval('#ow_start', (e) => e.style.display) === '' && await page.$eval('#ow_stop', (e) => e.style.display) === 'none');
 
   // settings
@@ -121,7 +122,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(2500);
   ok('Roll back: a toast says so and the files are still in place', (await page.evaluate(() => window.__toasts)).some((t) => /Rolled back/.test(t)) && fs.existsSync(path.join(DIR, 'rootfs.img')));
   await click('#ow_checkup');
-  ok('Check: it reads the latest release and says the plugin is up to date', /Latest release is 1\.0\.0: this plugin is up to date/.test(await waitText('#ow_prog_txt', /Latest release/, 20000)));
+  ok('Check: it reads and shows the latest release', /Latest: 1\.0\.0/.test(await waitText('#ow_prog_txt', /Latest:/, 20000)));
 
   // start / running view with a stub manager
   fs.writeFileSync(path.join(DIR, 'owrt-vm.sh'), `#!/bin/sh
@@ -148,7 +149,7 @@ esac
   await sleep(1000);
   await click('#ow_start');
   const run = await waitText('#ow_hero', /Running/, 20000);
-  ok('Start: the status turns to Running with uptime and "serving the hotspot"', /^Running$/.test(run) && /up 00:42 · LuCI ready · serving the hotspot/.test(await text('#ow_sub')));
+  ok('Start: the status turns to Running with uptime and "hotspot on"', /^Running$/.test(run) && /up 00:42 · LuCI ready · hotspot on/.test(await text('#ow_sub')));
   ok('Running: tiles show VM size, phone memory and hotspot mode', await text('#ow_vm') === '3 CPU · 256M' && await text('#ow_mem') === '412 MB' && await text('#ow_hs') === 'OpenWrt serves');
   ok('Running: Stop, Test, Open LuCI visible; Start hidden', await page.$eval('#ow_stop', (e) => e.style.display) === '' && await page.$eval('#ow_luci', (e) => e.style.display) === '' && await page.$eval('#ow_start', (e) => e.style.display) === 'none');
   ok('Running: access card names LuCI on the guest LAN address', /LuCI\s+http:\/\/(192\.168\.88\.1|192\.168\.66\.2)\//.test(await text('#ow_access')) && /root@192\.168\.88\.1/.test(await text('#ow_ssh_txt')));
@@ -173,13 +174,13 @@ esac
   await click('#ow_copy_luci');
   await click('#ow_copy_ssh');
   await sleep(500);
-  ok('Copy buttons: a toast confirms or shows the text to copy', (await page.evaluate(() => window.__toasts)).filter((t) => /^Copied$|Could not copy/.test(t)).length >= 2);
+  ok('Copy buttons: a toast confirms or shows the text to copy', (await page.evaluate(() => window.__toasts)).filter((t) => /^Copied$|Copy failed/.test(t)).length >= 2);
   await page.evaluate(() => { document.querySelectorAll('#matchi_owrt_modal details')[2].open = true; });
   await click('#ow_logs');
   ok('Show logs: the manager logs appear', /stub logs line/.test(await waitText('#ow_log', /stub logs line/, 10000)));
   await click('#ow_copy');
   await sleep(1500);
-  ok('Copy report: copied, or shown in the log box when the clipboard is blocked', (await page.evaluate(() => window.__toasts)).some((t) => /Report copied|Could not copy; the report is shown above/.test(t)));
+  ok('Copy report: copied, or shown in the log box when the clipboard is blocked', (await page.evaluate(() => window.__toasts)).some((t) => /Report copied|Copy failed, report shown above/.test(t)));
 
   // backups
   await click('#ow_backup');

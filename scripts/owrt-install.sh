@@ -125,18 +125,18 @@ fetch() {
 mgr_check() {
   MGR_ERR=
   if ! sh -n "$1" >/dev/null 2>&1; then
-    MGR_ERR="owrt-vm.sh of this release does not parse in this device's sh ($(sh -n "$1" 2>&1 | head -n 1 | cut -c1-110)): a bug in the release, nothing was changed"
+    MGR_ERR="release manager does not parse ($(sh -n "$1" 2>&1 | head -n 1 | cut -c1-110)); nothing was changed"
     return 1
   fi
   mc_out=$(OWRT_DIR="$2" sh "$1" state 2>&1)
   mc_rc=$?
   if [ "$mc_rc" -ne 0 ] || ! printf '%s\n' "$mc_out" | grep -q '^installed='; then
-    MGR_ERR="owrt-vm.sh of this release does not run here (state failed: $(printf '%s' "$mc_out" | head -n 1 | cut -c1-110)): a bug in the release, nothing was changed"
+    MGR_ERR="release manager does not run here ($(printf '%s' "$mc_out" | head -n 1 | cut -c1-110)); nothing was changed"
     return 1
   fi
   if [ -n "${3:-}" ]; then
     printf '%s\n' "$mc_out" | grep -qx 'installed=1' && printf '%s\n' "$mc_out" | grep -qx "version=$3" || {
-      MGR_ERR="the new release does not report itself as installed after the swap; the previous release was put back"
+      MGR_ERR="new release not seen as installed; previous release was put back"
       return 1
     }
   fi

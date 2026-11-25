@@ -167,18 +167,18 @@ fetch() {
 mgr_check() {
   MGR_ERR=
   if ! sh -n "$1" >/dev/null 2>&1; then
-    MGR_ERR="owrt-vm.sh of this release does not parse in this device's sh ($(sh -n "$1" 2>&1 | head -n 1 | cut -c1-110)): a bug in the release, nothing was changed"
+    MGR_ERR="release manager does not parse ($(sh -n "$1" 2>&1 | head -n 1 | cut -c1-110)); nothing was changed"
     return 1
   fi
   mc_out=$(OWRT_DIR="$2" sh "$1" state 2>&1)
   mc_rc=$?
   if [ "$mc_rc" -ne 0 ] || ! printf '%s\\n' "$mc_out" | grep -q '^installed='; then
-    MGR_ERR="owrt-vm.sh of this release does not run here (state failed: $(printf '%s' "$mc_out" | head -n 1 | cut -c1-110)): a bug in the release, nothing was changed"
+    MGR_ERR="release manager does not run here ($(printf '%s' "$mc_out" | head -n 1 | cut -c1-110)); nothing was changed"
     return 1
   fi
   if [ -n "\${3:-}" ]; then
     printf '%s\\n' "$mc_out" | grep -qx 'installed=1' && printf '%s\\n' "$mc_out" | grep -qx "version=$3" || {
-      MGR_ERR="the new release does not report itself as installed after the swap; the previous release was put back"
+      MGR_ERR="new release not seen as installed; previous release was put back"
       return 1
     }
   fi
@@ -432,12 +432,12 @@ esac
     const web = int(s.webPort, 1024, 65535);
     if (ssh === null) return { ok: false, error: 'SSH port must be 1024 to 65535' };
     if (web === null) return { ok: false, error: 'LuCI port must be 1024 to 65535' };
-    if (ssh === web) return { ok: false, error: 'The SSH and LuCI ports must differ' };
-    if ([2334, 8080, 9090, 9999, 5555].includes(ssh) || [2334, 8080, 9090, 9999, 5555].includes(web)) return { ok: false, error: 'That port is used on the F50 (2334, 5555, 8080, 9090, 9999)' };
+    if (ssh === web) return { ok: false, error: 'SSH and LuCI ports must differ' };
+    if ([2334, 8080, 9090, 9999, 5555].includes(ssh) || [2334, 8080, 9090, 9999, 5555].includes(web)) return { ok: false, error: 'Port in use on the F50 (2334, 5555, 8080, 9090, 9999)' };
     const dns = String(s.dnsUp);
     const m = dns.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
     if (!m || m.slice(1).some((x) => Number(x) > 255)) return { ok: false, error: 'DNS must be an IPv4 address like 8.8.8.8' };
-    if (!/^[A-Za-z0-9_.-]{1,15}$/.test(String(s.wanIf))) return { ok: false, error: 'Cellular interface name is not valid' };
+    if (!/^[A-Za-z0-9_.-]{1,15}$/.test(String(s.wanIf))) return { ok: false, error: 'Invalid cellular interface' };
     return {
       ok: true,
       clean: { CPUS: String(cpus), MEM: s.mem, EXPOSE: s.expose ? '1' : '0', LAN: s.hotspot ? '1' : '0', LAN_JOIN: s.hotspot ? '1' : '0', GUEST_DHCP4: s.hotspot ? '1' : '0', SSH_PORT: String(ssh), WEB_PORT: String(web), DNS_UP: dns, WAN_IF: String(s.wanIf) },
@@ -687,19 +687,19 @@ esac
 
   // [colour class, title, detail line]
   const hero = (st) => {
-    if (!st || !st.ok) return ['warn', 'Could not read the device state', 'Press refresh to try again.'];
-    if (st.installed === '0') return ['off', 'Not installed', 'Open Maintenance below and press Install.'];
+    if (!st || !st.ok) return ['warn', 'No device state', 'Press refresh.'];
+    if (st.installed === '0') return ['off', 'Not installed', 'Press Install below.'];
     if (st.running === '1') {
       const bits = [`up ${st.etime || '…'}`];
       if (st.guest_ping === '1') bits.push(st.luci === '1' ? 'LuCI ready' : 'booting');
-      if (st.joined === '1') bits.push('serving the hotspot');
+      if (st.joined === '1') bits.push('hotspot on');
       return ['on', 'Running', bits.join(' · ')];
     }
     const left = Number(st.leftovers || 0);
-    return left > 0 ? ['warn', 'Stopped', `${left} leftover(s): press Stop to clean`] : ['off', 'Stopped', 'The VM is off'];
+    return left > 0 ? ['warn', 'Stopped', `${left} leftover: press Stop`] : ['off', 'Stopped', 'VM is off'];
   };
 
-  const sshText = (st) => (st.joined === '1' ? `root@${st.lan_ip}` : st.expose === '1' ? `port ${st.ssh_port} on the hotspot address` : `root@${st.guest_ip} (from the phone only)`);
+  const sshText = (st) => (st.joined === '1' ? `root@${st.lan_ip}` : st.expose === '1' ? `hotspot address, port ${st.ssh_port}` : `root@${st.guest_ip} (phone only)`);
 
   const paint = (st) => {
     lastState = st;
@@ -718,14 +718,14 @@ esac
     dis('#ow_unjoin', !(run && st?.joined === '1'));
     dis('#ow_luci', !run);
     setText('#ow_install', inst0 ? 'Reinstall' : 'Install');
-    setText('#ow_rel', `${st?.release || 'none'} · ${PIN_SUMS_SHA256 ? 'pinned' : 'latest'}`);
+    setText('#ow_rel', `${st?.release || 'none'}${PIN_SUMS_SHA256 ? ' · pinned' : ''}`);
     setText('#ow_mem', st?.mem_avail_kb ? fmtMb(Number(st.mem_avail_kb)) : '–');
     setText('#ow_vm', st?.cpus && st?.mem ? `${st.cpus} CPU · ${st.mem}` : '–');
-    setText('#ow_hs', run ? (st.joined === '1' ? 'OpenWrt serves' : st.lan === '1' ? 'Not joined yet' : 'Off') : (st?.lan === '1' ? 'On at next start' : 'Off'));
+    setText('#ow_hs', run ? (st.joined === '1' ? 'OpenWrt serves' : st.lan === '1' ? 'Not joined yet' : 'Off') : (st?.lan === '1' ? 'On at start' : 'Off'));
     const card = q('#ow_accesscard');
     if (card) card.style.display = run ? '' : 'none';
     const url = luciUrl(st, location.hostname);
-    setText('#ow_access', url ? `LuCI  ${url}` : 'LuCI has no address from this page. Turn on "Open LuCI and SSH from the hotspot" in Settings, or use hotspot mode.');
+    setText('#ow_access', url ? `LuCI  ${url}` : 'No LuCI address. Turn on "LuCI and SSH from hotspot" in Settings.');
     const cl = q('#ow_copy_luci'); if (cl) { cl.dataset.v = url || ''; cl.style.display = url ? '' : 'none'; }
     if (run) {
       const ssh = sshText(st);
@@ -764,7 +764,7 @@ esac
     const box = q('#ow_backups');
     if (!box) return;
     box.replaceChildren();
-    if (!list.length) { box.textContent = 'No backups yet. Stop the VM, then press Back up now.'; return; }
+    if (!list.length) { box.textContent = 'No backups. Stop the VM, then Back up now.'; return; }
     list.forEach((b) => {
       const row = document.createElement('div');
       row.className = 'ow-r ow-brow';
@@ -776,7 +776,7 @@ esac
       const rs = document.createElement('button');
       rs.className = 'ow-act'; rs.textContent = 'Restore';
       rs.onclick = guarded(async () => {
-        if (!confirmBox(`Replace the OpenWrt disk and settings with the backup of ${b.name}? The current disk is lost.`)) return;
+        if (!confirmBox(`Restore backup ${b.name}? The current disk is lost.`)) return;
         const o = await runRoot(mgr(`restore ${b.name}`), 90000);
         if (!o.ok) throw new Error(o.text.replace(/^owrt-vm: (ERROR: )?/, ''));
         toast('Backup restored', 'green', 4000);
@@ -878,7 +878,7 @@ esac
           </div>
           <div class="ow-tiles">
             <div class="ow-tile"><small>VM</small><b id="ow_vm">–</b></div>
-            <div class="ow-tile"><small>Phone free memory</small><b id="ow_mem">–</b></div>
+            <div class="ow-tile"><small>Free memory</small><b id="ow_mem">–</b></div>
             <div class="ow-tile"><small>Release</small><b id="ow_rel">–</b></div>
             <div class="ow-tile"><small>Hotspot</small><b id="ow_hs">–</b></div>
           </div>
@@ -897,10 +897,10 @@ esac
               <div><label for="ow_dns">DNS</label><input type="text" id="ow_dns"></div>
               <div><label for="ow_wan">Cellular</label><input type="text" id="ow_wan"></div>
             </div>
-            <label class="ow-sw"><input type="checkbox" id="ow_boot"> Start with the phone</label>
-            <label class="ow-sw"><input type="checkbox" id="ow_hotspot"> OpenWrt serves the hotspot (clients get 192.168.88.x)</label>
-            <label class="ow-sw"><input type="checkbox" id="ow_expose"> Open LuCI and SSH from the hotspot (clients on 192.168.0.x)</label>
-            <div class="ow-note">A new OpenWrt disk has NO root password. Set one in LuCI (System > Administration) before you turn on either hotspot option: anyone who can join the hotspot can reach SSH and LuCI. Changes apply at the next start.</div>
+            <label class="ow-sw"><input type="checkbox" id="ow_boot"> Start on boot</label>
+            <label class="ow-sw"><input type="checkbox" id="ow_hotspot"> OpenWrt serves hotspot (192.168.88.x)</label>
+            <label class="ow-sw"><input type="checkbox" id="ow_expose"> LuCI and SSH from hotspot (192.168.0.x)</label>
+            <div class="ow-note">No root password by default. Set one in LuCI (System > Administration) before enabling hotspot options. Applies at next start.</div>
             <div class="ow-r" style="margin-top:8px"><span></span><button type="button" class="ow-act ow-pri" id="ow_save">Save</button></div>
           </details>
 
@@ -911,11 +911,11 @@ esac
             <div class="ow-bar"><i id="ow_prog"></i></div>
             <div class="ow-note" id="ow_prog_txt"></div>
             <div class="ow-note" id="ow_pinnote"></div>
-            <div class="ow-note">An install replaces the OpenWrt disk (and kernel). Export your OpenWrt settings first in LuCI (System > Backup). The previous release is kept for one roll back.</div>
-            <span class="ow-lbl">Backups of the OpenWrt disk</span>
+            <div class="ow-note">Install replaces the OpenWrt disk. Export settings first in LuCI (System > Backup). Previous release kept for one roll back.</div>
+            <span class="ow-lbl">Backups</span>
             <div id="ow_backups" class="ow-note" style="margin-top:0"></div>
             <div class="ow-r" style="margin-top:8px"><button type="button" class="ow-act" id="ow_backup">${ico('down')}Back up now</button><button type="button" class="ow-act ow-dng" id="ow_remove">Remove VM</button></div>
-            <div class="ow-note">Backups need the VM stopped and only restore onto the same release. Remove stops the VM and deletes the boot entry and VM files; backups stay in ${esc(DIR)}/backup.</div>
+            <div class="ow-note">Backup needs the VM stopped and restores only on the same release. Remove deletes the VM files; backups stay in ${esc(DIR)}/backup.</div>
           </details>
 
           <details class="ow-card">
@@ -927,12 +927,12 @@ esac
     if (!created?.id) throw new Error('createModal did not return a dialog (is the page fully loaded?)');
     modalEl = created.el;
     (modalApi ? modalApi.show : showModal)(created.id);
-    setText('#ow_pinnote', PIN_SUMS_SHA256 ? `Pinned: only release ${RELEASE_TAG} with the checksum list ${PIN_SUMS_SHA256.slice(0, 12)}… is accepted.` : `Install always takes the newest GitHub release. Files are checked against that release's own SHA256SUMS; a release that needs a newer plugin is refused.`);
+    setText('#ow_pinnote', PIN_SUMS_SHA256 ? `Pinned to ${RELEASE_TAG}.` : `Installs the latest release. Checked against its own SHA256SUMS.`);
 
     q('#ow_logx').onclick = () => { const b = q('#ow_logbox'); if (b) b.style.display = 'none'; };
     const copyText = async (v) => {
-      if (!v) return toast('Nothing to copy yet', 'orange', 3000);
-      try { await navigator.clipboard.writeText(v); toast('Copied', 'green', 2000); } catch (_) { toast(`Could not copy. Select it by hand: ${v}`, 'orange', 6000); }
+      if (!v) return toast('Nothing to copy', 'orange', 3000);
+      try { await navigator.clipboard.writeText(v); toast('Copied', 'green', 2000); } catch (_) { toast(`Copy failed: ${v}`, 'orange', 6000); }
     };
     q('#ow_copy_luci').onclick = () => copyText(q('#ow_copy_luci').dataset.v);
     q('#ow_copy_ssh').onclick = () => copyText(q('#ow_copy_ssh').dataset.v);
@@ -941,24 +941,24 @@ esac
     q('#ow_start').onclick = guarded(async () => {
       showLog('Starting…');
       const r = await startVm(showLog);
-      if (r.rc !== 0) throw new Error(`Start failed. ${r.log.split('\n').slice(-2).join(' ').slice(0, 200)}`);
+      if (r.rc !== 0) throw new Error(`Start failed: ${r.log.split('\n').slice(-2).join(' ').slice(0, 200)}`);
       toast('VM started', 'green', 3000);
     }, 'Starting…');
     q('#ow_stop').onclick = guarded(async () => {
       const r = await stopVm();
       showLog(r.text);
-      if (!r.ok) throw new Error('Stop reported an error, see the log');
-      toast(/WARNING/.test(r.text) ? 'Stopped, with leftovers (see log)' : 'VM stopped, network undone', /WARNING/.test(r.text) ? 'orange' : 'green', 4000);
+      if (!r.ok) throw new Error('Stop failed, see log');
+      toast(/WARNING/.test(r.text) ? 'Stopped, leftovers (see log)' : 'VM stopped', /WARNING/.test(r.text) ? 'orange' : 'green', 4000);
     }, 'Stopping…');
-    q('#ow_test').onclick = guarded(async () => { const r = await runRoot(mgr('test'), 60000); showLog(r.text); toast(r.ok ? 'Test passed' : 'Test failed (see log)', r.ok ? 'green' : 'orange', 4000); }, 'Testing…');
+    q('#ow_test').onclick = guarded(async () => { const r = await runRoot(mgr('test'), 60000); showLog(r.text); toast(r.ok ? 'Test passed' : 'Test failed, see log', r.ok ? 'green' : 'orange', 4000); }, 'Testing…');
     q('#ow_join').onclick = guarded(async () => {
-      if (!confirmBox('Join the OpenWrt LAN to the hotspot? Clients will get their address from OpenWrt. Leave hotspot undoes it.')) return;
-      const r = await runRoot(mgr('join'), 60000); showLog(r.text); if (!r.ok) throw new Error('Join failed, see the log');
+      if (!confirmBox('Join OpenWrt LAN to the hotspot? Clients get addresses from OpenWrt.')) return;
+      const r = await runRoot(mgr('join'), 60000); showLog(r.text); if (!r.ok) throw new Error('Join failed, see log');
     }, 'Joining…');
     q('#ow_unjoin').onclick = guarded(async () => { const r = await runRoot(mgr('unjoin'), 30000); showLog(r.text); }, '…');
     q('#ow_luci').onclick = () => {
       const url = luciUrl(lastState, location.hostname);
-      if (!url) return toast('LuCI has no address from this page (see the note under the buttons)', 'orange', 6000);
+      if (!url) return toast('No LuCI address from this page', 'orange', 6000);
       window.open(url, '_blank', 'noopener');
     };
     q('#ow_logs').onclick = guarded(async () => { showLog((await runRoot(mgr('logs'), 20000)).text); }, '…');
@@ -967,17 +967,17 @@ esac
       const logs = (await runRoot(mgr('logs'), 20000)).text;
       const chk = (await runRoot(mgr('check'), 20000)).text;
       const text = [`plugin 1.0 tag ${RELEASE_TAG} pinned=${PIN_SUMS_SHA256 ? 'yes' : 'no'}`, '', ...Object.entries(st).map(([k, v]) => `${k}=${v}`), '', '== check ==', chk, '', '== logs ==', logs].join('\n');
-      try { await navigator.clipboard.writeText(text); toast('Report copied', 'green', 3000); } catch (_) { showLog(text); toast('Could not copy; the report is shown above', 'orange', 5000); }
+      try { await navigator.clipboard.writeText(text); toast('Report copied', 'green', 3000); } catch (_) { showLog(text); toast('Copy failed, report shown above', 'orange', 5000); }
     }, '…');
 
     q('#ow_save').onclick = guarded(async () => {
       const s = readSettingsForm();
       const v = validateSettings(s);
       if (!v.ok) throw new Error(v.error);
-      if ((s.hotspot || s.expose) && !(confirmBox('Hotspot mode / LuCI-SSH from the hotspot let anyone on your hotspot reach OpenWrt. Did you set a root password in OpenWrt first?'))) return;
+      if ((s.hotspot || s.expose) && !(confirmBox('This exposes OpenWrt to hotspot users. Root password set?'))) return;
       await saveSettings(s);
       await setBoot(q('#ow_boot').checked);
-      toast(lastState?.running === '1' ? 'Saved. Restart the VM to apply' : 'Saved', 'green', 4000);
+      toast(lastState?.running === '1' ? 'Saved. Restart VM to apply' : 'Saved', 'green', 4000);
     }, 'Saving…');
 
     const showProg = (st) => {
@@ -987,9 +987,9 @@ esac
     };
     q('#ow_install').onclick = guarded(async () => {
       const u = await checkUpdate();
-      if (!confirmBox(`Install the latest release (${u.latest}) from github.com/${REPO}? This downloads about 17 MB and replaces the OpenWrt disk (the previous release is kept for one roll back). Files are checked against that release's own SHA256SUMS.`)) return;
+      if (!confirmBox(`Install ${u.latest}? Downloads ~17 MB, replaces the OpenWrt disk. Previous release kept for one roll back.`)) return;
       if (lastState?.running === '1') {
-        if (!confirmBox('The VM is running and will be stopped first. Continue?')) return;
+        if (!confirmBox('VM will be stopped first. Continue?')) return;
         await stopVm();
       }
       const st = await installRelease(showProg, { latest: true });
@@ -999,10 +999,10 @@ esac
     q('#ow_relpage').onclick = () => window.open(`https://github.com/${REPO}/releases`, '_blank', 'noopener');
     q('#ow_checkup').onclick = guarded(async () => {
       const u = await checkUpdate();
-            setText('#ow_prog_txt', `Latest release is ${u.latest}. Press Install to get it.`);
+            setText('#ow_prog_txt', `Latest: ${u.latest}`);
     }, 'Checking…');
     q('#ow_rollback').onclick = guarded(async () => {
-      if (!confirmBox('Swap back to the previous release (kernel, disk and manager)? The VM must be stopped.')) return;
+      if (!confirmBox('Roll back to the previous release? VM must be stopped.')) return;
       await writeFile(INSTALLER, INSTALL_SH, 755);
       const r = await runRoot(inst('rollback'), 60000);
       showLog(r.text);
@@ -1016,7 +1016,7 @@ esac
       toast('Backup done', 'green', 3000);
     }, 'Backing up…');
     q('#ow_remove').onclick = guarded(async () => {
-      if (!confirmBox('Remove the OpenWrt VM from this device? The VM is stopped, the boot entry and the VM files are deleted. Backups stay.')) return;
+      if (!confirmBox('Remove the VM? Boot entry and VM files are deleted. Backups stay.')) return;
       const r = await runRoot(`[ -f ${MGR} ] && ${mgr('stop')}; rm -f ${BOOT_FILE}; cd ${DIR} 2>/dev/null && rm -rf cloud-hypervisor Image rootfs.img VERSION owrt-vm.sh owrt-install.sh install prev run console.log console.log.1 vmm.log start.log vm.conf; echo REMOVED`, 90000);
       if (!r.text.includes('REMOVED')) throw new Error(r.text || 'Remove failed');
       toast('Removed', 'green', 4000);
@@ -1026,7 +1026,7 @@ esac
     if (!(rootOk.ok && rootOk.text.includes('root'))) {
       session += 1;
       document.getElementById(MODAL_NAME)?.remove();
-      toast('Root access is not available. Enable root for MatchiTOOL first, then open this plugin again', 'red', 7000);
+      toast('No root. Enable root for MatchiTOOL, then reopen.', 'red', 7000);
       return;
     }
     await refresh(true);
@@ -1075,11 +1075,11 @@ esac
     if (mainButton.dataset.opening === '1') return;
     mainButton.dataset.opening = '1';
     try {
-      if (!window.matchi?.root || !(window.matchi?.modal || (typeof createModal === 'function' && typeof showModal === 'function'))) return toast('OpenWrt VM: this MatchiTOOL version does not expose matchi.root and a dialog function', 'red', 8000);
+      if (!window.matchi?.root || !(window.matchi?.modal || (typeof createModal === 'function' && typeof showModal === 'function'))) return toast('This MatchiTOOL version is not supported (no root or dialog API)', 'red', 8000);
       await openModal();
     } catch (error) {
       console.error('OpenWrt VM failed to open', error);
-      toast(`OpenWrt VM failed to open: ${error?.message || error}`, 'red', 9000);
+      toast(`Failed to open: ${error?.message || error}`, 'red', 9000);
     } finally { delete mainButton.dataset.opening; }
   };
   attach();
