@@ -1,0 +1,5 @@
+# OpenWrt source pin. build.sh clones OPENWRT_TAG and compares HEAD with
+# OPENWRT_COMMIT. Empty commit = warning only (the first run prints the
+# commit to pin). Set OWRT_REQUIRE_PIN=1 to make an empty commit an error.
+OPENWRT_TAG=v25.12.6
+OPENWRT_COMMIT=64900e756efa667774214f9c6b17c113222e01f7

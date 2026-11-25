@@ -1,0 +1,6 @@
+# VMM source pin (cloud-hypervisor). build.sh clones CH_TAG and compares HEAD
+# with CH_COMMIT (the commit the tag points to). A wrong commit is an error.
+# An empty commit is a warning only: the build prints the commit to pin.
+# Upstream: https://github.com/cloud-hypervisor/cloud-hypervisor (Apache-2.0)
+CH_TAG=v54.1
+CH_COMMIT=74aeae19cb1ee2c44d33796b0e4e95e1a68e94dd

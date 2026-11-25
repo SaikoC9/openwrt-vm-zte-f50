@@ -1,0 +1,20 @@
+# OpenWrt .config seed. build.sh runs "make defconfig" on it, then
+# lib.sh (guest_check_config) fails the build if a required symbol is gone.
+CONFIG_TARGET_armsr=y
+CONFIG_TARGET_armsr_armv8=y
+CONFIG_TARGET_armsr_armv8_DEVICE_generic=y
+
+# Bare ext4 rootfs for /dev/vda. No squashfs, no EFI/GRUB disk images.
+CONFIG_TARGET_ROOTFS_EXT4FS=y
+# CONFIG_TARGET_ROOTFS_SQUASHFS is not set
+# CONFIG_GRUB_IMAGES is not set
+# CONFIG_TARGET_ROOTFS_TARGZ is not set
+CONFIG_TARGET_ROOTFS_PARTSIZE=48
+
+# Services the VM provides.
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_uhttpd=y
+CONFIG_PACKAGE_firewall4=y
+CONFIG_PACKAGE_dnsmasq=y
+CONFIG_PACKAGE_odhcpd-ipv6only=y
+CONFIG_PACKAGE_odhcp6c=y

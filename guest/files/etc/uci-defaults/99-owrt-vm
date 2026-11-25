@@ -1,0 +1,67 @@
+#!/bin/sh
+# First boot only. eth0 = WAN (tap to the phone), eth1 = LAN (hotspot side).
+# The LAN address is replaced from the kernel command line on every boot by
+# /etc/init.d/owrt-vm.
+
+ULA=$(uci -q get network.globals.ula_prefix)
+
+{
+	cat <<'NET'
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+NET
+	[ -z "$ULA" ] || echo "	option ula_prefix '$ULA'"
+	cat <<'NET'
+
+config interface 'wan'
+	option device 'eth0'
+	option proto 'static'
+	option ipaddr '192.168.66.2'
+	option netmask '255.255.255.0'
+	option gateway '192.168.66.1'
+	list dns '192.168.66.1'
+
+config interface 'lan'
+	option device 'eth1'
+	option proto 'static'
+	option ipaddr '192.168.88.1'
+	option netmask '255.255.255.0'
+	option ip6assign '60'
+NET
+} > "${OWRT_NETCONF:-/etc/config/network}"
+
+# Management (SSH, LuCI) is reachable from the WAN side only from the phone's
+# tap address. The phone masquerades its forwards, so they arrive from there.
+uci -q delete firewall.owrt_mgmt
+uci set firewall.owrt_mgmt=rule
+uci set firewall.owrt_mgmt.name='Allow-Mgmt-from-phone'
+uci set firewall.owrt_mgmt.src='wan'
+uci set firewall.owrt_mgmt.src_ip='192.168.66.1'
+uci set firewall.owrt_mgmt.proto='tcp'
+uci set firewall.owrt_mgmt.dest_port='22 80'
+uci set firewall.owrt_mgmt.target='ACCEPT'
+uci commit firewall
+
+# LAN DHCP. Step 4: OpenWrt is the only DHCPv4 server on the hotspot LAN
+# (the phone blocks Android's own while the LAN is joined). DHCPv6 and RA stay
+# off until Step 5. Lease: OWRT_LEASE (default 1h, short so clients fall back
+# to Android's DHCP soon after the VM stops).
+uci -q delete dhcp.lan.ignore
+uci set dhcp.lan=dhcp
+uci set dhcp.lan.interface='lan'
+uci set dhcp.lan.start='100'
+uci set dhcp.lan.limit='150'
+uci set dhcp.lan.leasetime="${OWRT_LEASE:-1h}"
+uci set dhcp.lan.dhcpv4='server'
+uci set dhcp.lan.dhcpv6='disabled'
+uci set dhcp.lan.ra='disabled'
+uci -q delete dhcp.lan.ra_slaac
+uci -q delete dhcp.lan.ra_flags
+uci commit dhcp
+
+exit 0

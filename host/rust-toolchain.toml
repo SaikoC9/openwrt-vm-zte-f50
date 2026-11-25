@@ -1,0 +1,6 @@
+# Pinned Rust for everything under host/. A component with its own
+# rust-toolchain.toml (an upstream crosvm checkout) overrides this.
+[toolchain]
+channel = "1.91.0"
+profile = "minimal"
+targets = ["aarch64-unknown-linux-musl"]

@@ -1,0 +1,9 @@
+#!/bin/sh /etc/rc.common
+# Applies the LAN address from the kernel command line on every boot,
+# before netifd (START=20) reads /etc/config/network.
+START=19
+
+start() {
+	. /lib/owrt-vm/lan.sh
+	owrt_lan_apply
+}

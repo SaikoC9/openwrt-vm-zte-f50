@@ -1,0 +1,30 @@
+# Copy to vm.conf (same folder as owrt-vm.sh) and change only what you need.
+# This file is read as shell. Root-owned, do not put untrusted text in it.
+CPUS=2
+MEM=256M
+NET=1                    # 0 = boot with no network at all
+WAN_IF=sipa_eth0         # cellular interface of the F50
+DNS_UP=8.8.8.8           # upstream DNS the guest's queries are sent to
+BOOT_WAIT=60             # seconds start waits for the guest to answer ping
+WAIT_SVC=1               # 1 = start also waits until LuCI answers (needs nc)
+SVC_WAIT=60              # seconds start waits for LuCI after the ping answered
+TEST_WAIT=30             # seconds "test" retries before it reports FAIL
+
+# Step 2: port forwards for phones/PCs on the hotspot. OFF by default.
+# The guest has NO root password yet: set one first (start fg, run passwd).
+# Anyone who can join your hotspot reaches SSH and LuCI when this is 1.
+EXPOSE=0
+EXPOSE_IF=br0            # hotspot bridge of the F50
+HOTSPOT_NET=             # subnet of EXPOSE_IF, e.g. 192.168.0.0/24. Empty = auto-detect
+SSH_PORT=2223            # host port -> guest 22
+WEB_PORT=8081            # host port -> guest 80 (LuCI). Not 8080: it is used on the F50
+
+# Step 3a: second NIC (eth1, LAN) for the guest on its own tap, host
+# 192.168.88.2 <-> guest 192.168.88.1. NOT joined to br0: the hotspot and
+# Android's DHCP are not touched. Needs NET=1.
+LAN=0
+
+# Phase 6 (MatchiTOOL plugin). The plugin writes its own block into vm.conf;
+# these are the manager-side settings it does not touch.
+BOOT_NET_WAIT=120        # "boot": seconds to wait for the data connection (the hotspot bridge gets 30 s)
+BACKUP_KEEP=3            # "backup" keeps the newest N backups
