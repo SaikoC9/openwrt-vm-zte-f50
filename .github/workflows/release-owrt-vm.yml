@@ -1,13 +1,10 @@
 name: Release OpenWrt VM
 
-# Tag vMAJOR.MINOR.PATCH (for example v0.1.0) builds everything from that commit and publishes a
-# GitHub Release with: Image, rootfs.img.gz, cloud-hypervisor, owrt-vm.sh, owrt-vm.conf.example,
-# owrt-kvmprobe, owrt-fwd (when it exists), owrt-manifest.json, SHA256SUMS.
-#
-#   git tag v0.1.0 && git push origin v0.1.0
-#
-# By hand (Actions, Run workflow) it does the same build and checks, enters a version, and stops
-# before publishing: use it as a dry run. The long part is the OpenWrt guest build (about 1 hour).
+# Run workflow (Actions) with a version builds everything from that commit and publishes a
+# GitHub Release vMAJOR.MINOR.PATCH with: Image, rootfs.img.gz, cloud-hypervisor, owrt-vm.sh,
+# owrt-vm.conf.example, owrt-kvmprobe, owrt-fwd (when it exists), owrt-manifest.json, SHA256SUMS.
+# Pushing a tag vMAJOR.MINOR.PATCH does the same. The long part is the OpenWrt guest build
+# (about 1 hour). The release tag must not exist yet.
 on:
   push:
     tags:
@@ -15,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version for the dry run, MAJOR.MINOR.PATCH (no leading v)"
+        description: "Version to release, MAJOR.MINOR.PATCH (no leading v); the tag becomes vX.Y.Z"
         required: true
         type: string
 
@@ -97,8 +94,6 @@ jobs:
           if-no-files-found: error
 
   publish:
-    # Tags only. A manual run ends after "build".
-    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -107,7 +102,7 @@ jobs:
       actions: read     # download the artifact of this run
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ github.ref_name }}
+      TAG: v${{ needs.build.outputs.version }}
       VERSION: ${{ needs.build.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -135,7 +130,7 @@ jobs:
       - name: Create the release
         run: |
           gh release create "$TAG" dist/release/* \
-            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "OpenWrt VM $TAG" --notes-file dist/notes.md
       - name: Download the published assets and verify them
         run: |
