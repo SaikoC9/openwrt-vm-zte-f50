@@ -2,7 +2,9 @@
 # owrt-vm.sh - MatchiTOOL OpenWrt VM manager.
 # Phase 4 (minimal manager) + Phase 5 step 1 (WAN: tap, NAT, DNS) + step 2 (port forwards)
 # + step 3a (LAN tap) + step 3b (join the LAN tap to br0) + step 4b (block
-# Android's DHCP on br0) + step 4c (OpenWrt serves DHCPv4 on the joined LAN).
+# Android's DHCP on br0) + step 4c (OpenWrt serves DHCPv4 on the joined LAN)
+# + Phase 6 step 3 (state and gone commands for the MatchiTOOL plugin, DIR
+# defaults to the folder of this script).
 #
 # Usage (as root on the F50, in the folder that holds the files):
 #   sh owrt-vm.sh check        read-only checks (caps, /dev/kvm, tun, cellular)
@@ -18,18 +20,17 @@
 #   sh owrt-vm.sh dhcp-block [SECONDS]   step 4b: drop Android's DHCP on br0
 #   sh owrt-vm.sh dhcp-unblock undo the block (also done by unjoin, stop, reboot)
 #   sh owrt-vm.sh restart | status | logs | loop N
+#   sh owrt-vm.sh cpu [SECONDS]  CPU use per VMM thread (default 5 s, 100% = one core)
+#   sh owrt-vm.sh state        for the plugin: key=value lines, nothing else, exit 0
+#   sh owrt-vm.sh gone         silent; exit 0 only when the VM is stopped and
+#                              nothing is left behind (see: leftovers)
 #
-# Phase 6 (MatchiTOOL plugin) commands:
-#   sh owrt-vm.sh state [probe]  machine-readable key=value lines (the plugin reads these);
-#                                "probe" adds one ping and one LuCI request
-#   sh owrt-vm.sh start-bg       start detached; progress goes to start.log, the last
-#                                line is "start finished rc=N"
-#   sh owrt-vm.sh boot           for the boot entry: wait for the data connection, then start
-#   sh owrt-vm.sh version        manager API number and installed release
-#   sh owrt-vm.sh backup         copy the OpenWrt disk + vm.conf to backup/ (VM must be stopped)
-#   sh owrt-vm.sh backups        list backups: NAME SIZE_KB RELEASE
-#   sh owrt-vm.sh restore NAME   put a backup back (NAME or "latest"; same release only)
-#   sh owrt-vm.sh backup-del NAME
+# state keys: installed (1 when cloud-hypervisor, Image and rootfs.img are all
+# there), version (first line of DIR/VERSION, empty when missing), running, pid,
+# cpus, mem, lan, joined, dhcp_block, dhcp_block_secs (seconds until the
+# auto-unblock, 0 when there is no timer or no block), expose, guest_dhcp4,
+# leftovers (-1 while running: taps and rules are expected then),
+# ip_forward, mem_avail_kb.
 #
 # LAN=1 (Phase 5 step 3a): gives the guest its second NIC (eth1, LAN) on a
 # SEPARATE tap, owrt-lan, host 192.168.88.2 <-> guest 192.168.88.1. It is not
@@ -61,16 +62,33 @@
 # are a conflict; if the block fails, join undoes itself. unjoin, stop and any
 # failed start remove join and block. A manual dhcp-unblock while joined warns.
 #
+# Idle CPU: the VM should cost almost nothing when the guest has nothing to do.
+# "cpu" shows where the time goes (vcpuN = guest running or the host polling
+# for it, other threads = disk, net, serial). HALT_POLL=0 (default) turns off
+# KVM halt polling while the VM runs, so an idle vCPU sleeps instead of
+# spinning before it blocks; the old value is put back by stop and by any
+# failed start. HALT_POLL= (empty) leaves the host setting alone.
+#
 # SAFETY RULE: every change is recorded and undone by stop, and by any
 # failed start. Android's br0, usb0 and wlan0 are touched ONLY by join (one
 # port added to br0, one address added to br0); stop and unjoin remove both.
 # Settings: optional vm.conf next to this script (see owrt-vm.conf.example).
 
-DIR=${OWRT_DIR:-/data/local/matchi_owrt}
+# Folder of this script (also where the auto-unblock timer finds it again).
+case $0 in
+  */*) SELF_DIR=${0%/*} ;;
+  *) SELF_DIR=. ;;
+esac
+SELF_DIR=$(cd "$SELF_DIR" 2>/dev/null && pwd) || SELF_DIR=$PWD
+SELF=$SELF_DIR/${0##*/}
+DIR=${OWRT_DIR:-$SELF_DIR}
 CONF=${OWRT_CONF:-$DIR/vm.conf}
 
 CPUS=2
 MEM=256M
+HALT_POLL=0
+HALT_FILE=/sys/module/kvm/parameters/halt_poll_ns
+CLK_TCK=100
 NET=1
 TAP=owrt-wan
 WAN_IF=sipa_eth0
@@ -114,11 +132,9 @@ LOOP_BOOT_WAIT=30
 KVM_DEV=/dev/kvm
 CAP_FILE=/proc/self/status
 IPF=/proc/sys/net/ipv4/ip_forward
+MEMINFO=/proc/meminfo
 TUN_DEV=/dev/tun
 TUN_LINK=/dev/net/tun
-MANAGER_API=1
-BOOT_NET_WAIT=120
-BACKUP_KEEP=3
 
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && . "$CONF"
@@ -130,12 +146,10 @@ FWD_STATE=$RUN/ip_forward
 TUN_STATE=$RUN/tun_link
 LAN_STATE=$RUN/lan_join
 BLOCK_STATE=$RUN/dhcp_block
-case $0 in /*) SELF=$0 ;; *) SELF=$PWD/$0 ;; esac
+HALT_STATE=$RUN/halt_poll_ns
 CONSOLE=$DIR/console.log
 VMMLOG=$DIR/vmm.log
 CH=$DIR/cloud-hypervisor
-STARTLOG=$DIR/start.log
-BACKUP_DIR=$DIR/backup
 
 say() { echo "owrt-vm: $*"; }
 die() { echo "owrt-vm: ERROR: $*" >&2; exit 1; }
@@ -265,7 +279,7 @@ lan_join() {
   fi
   [ "$GUEST_DHCP_OFF" = 1 ] || [ "$GUEST_DHCP4" = 1 ] || {
     say "join refused: GUEST_DHCP_OFF is not 1 (and GUEST_DHCP4 is not 1). Either turn DHCP, DHCPv6 and RA off on the guest LAN"
-    say "(uci set dhcp.lan.ignore=1 ...) and put GUEST_DHCP_OFF=1 in vm.conf, or enable DHCPv4 on it and put GUEST_DHCP4=1."
+    say "(uci set dhcp.lan.ignore=1 ...) and put GUEST_DHCP_OFF=1 in vm.conf, or enable DHCPv4 on it and put GUEST_DHCP4=1. See OPENWRT_VM_PLAN.txt, steps 3b and 4c."
     return 1
   }
   has_net_admin || { say "join: root has no CAP_NET_ADMIN"; return 1; }
@@ -399,6 +413,83 @@ net_up() {
   must ip rule add from "$NET_CIDR" lookup "$WAN_TABLE" pref 5002 || return 1
 }
 
+# ------------------------------------------------------------ idle CPU tuning
+# tune_up: switch KVM halt polling to $HALT_POLL ns while the VM runs. Only the
+# first original value is kept, so a start after a crash still restores the
+# real one. Needs a writable $HALT_FILE; otherwise it says so and goes on.
+tune_up() {
+  [ -n "$HALT_POLL" ] || return 0
+  case $HALT_POLL in *[!0-9]*) say "HALT_POLL must be a number or empty, halt polling left alone"; return 0 ;; esac
+  [ -w "$HALT_FILE" ] || { say "halt polling: $HALT_FILE not writable, left alone"; return 0; }
+  read -r old < "$HALT_FILE" 2>/dev/null || return 0
+  [ "$old" = "$HALT_POLL" ] && return 0
+  mkdir -p "$RUN" 2>/dev/null
+  [ -e "$HALT_STATE" ] || echo "$old" > "$HALT_STATE"
+  if echo "$HALT_POLL" > "$HALT_FILE" 2>/dev/null; then
+    say "KVM halt polling $old -> $HALT_POLL ns while the VM runs"
+  else
+    say "halt polling: could not write $HALT_FILE, left alone"
+    rm -f "$HALT_STATE"
+  fi
+}
+
+tune_down() {
+  [ -e "$HALT_STATE" ] || return 0
+  read -r old < "$HALT_STATE" 2>/dev/null
+  case $old in ''|*[!0-9]*) ;; *) echo "$old" > "$HALT_FILE" 2>/dev/null ;; esac
+  rm -f "$HALT_STATE"
+}
+
+# cpu_sample PID: one line per thread, "TID TICKS NAME" (user + system ticks).
+# NAME comes last because thread names can hold spaces.
+cpu_sample() {
+  p=$1
+  for t in /proc/"$p"/task/*; do
+    [ -r "$t/stat" ] || continue
+    read -r line < "$t/stat" 2>/dev/null || continue
+    nm=${line#*(}; nm=${nm%) *}
+    rest=${line##*) }
+    # shellcheck disable=SC2086
+    set -- $rest
+    [ $# -ge 13 ] || continue
+    echo "${t##*/} $(( ${12} + ${13} )) $nm"
+  done
+}
+
+# cpu [SECONDS]: CPU use of every thread of the VMM over SECONDS (default 5),
+# in percent of ONE core. Threads under 0.1% are left out.
+cmd_cpu() {
+  is_running || die "VM is not running (sh owrt-vm.sh start)"
+  secs=${1:-5}
+  case $secs in ''|*[!0-9]*|0) die "usage: sh owrt-vm.sh cpu [SECONDS]" ;; esac
+  read -r pid < "$PIDFILE"
+  mkdir -p "$RUN" || die "cannot create $RUN"
+  A=$RUN/cpu.a; B=$RUN/cpu.b; D=$RUN/cpu.d
+  cpu_sample "$pid" > "$A"
+  sleep "$secs"
+  is_running || { rm -f "$A" "$B" "$D"; die "VM stopped during the measurement (see: sh owrt-vm.sh logs)"; }
+  cpu_sample "$pid" > "$B"
+  # D: "TENTHS NAME", tenths of a percent of one core per thread
+  : > "$D"
+  vc=0; ot=0
+  while read -r tid tb nm; do
+    ta=$(sed -n "s/^$tid \([0-9]*\) .*/\1/p" "$A" | head -n 1)
+    [ -n "$ta" ] || ta=0
+    d=$(( (tb - ta) * 1000 / (secs * CLK_TCK) ))
+    case $nm in vcpu*) vc=$((vc + d)) ;; *) ot=$((ot + d)) ;; esac
+    [ "$d" -ge 1 ] && echo "$d $nm" >> "$D"
+  done < "$B"
+  say "CPU over ${secs}s, 100% = one core (cpus=$CPUS, mem=$MEM)"
+  sort -rn "$D" | while read -r d nm; do
+    say "  $(printf '%-22s' "$nm") $((d / 10)).$((d % 10))%"
+  done
+  say "vcpu threads: $((vc / 10)).$((vc % 10))%   other VMM threads: $((ot / 10)).$((ot % 10))%"
+  hp=$(head -n 1 "$HALT_FILE" 2>/dev/null)
+  say "KVM halt_poll_ns now: ${hp:-unknown} (HALT_POLL=${HALT_POLL:-unset})"
+  rm -f "$A" "$B" "$D"
+  return 0
+}
+
 net_down_rules() {
   dhcp_unblock
   while ipt -D FORWARD -j OWRT_FWD 2>/dev/null; do :; done
@@ -426,6 +517,7 @@ net_down() {
     rm -f "$TUN_LINK"; rmdir "$(dirname "$TUN_LINK")" 2>/dev/null
     rm -f "$TUN_STATE"
   fi
+  tune_down
 }
 
 # wait_tap_dev DEV HOST_IP PREFIX: wait for the tap, make sure it has its
@@ -463,6 +555,7 @@ leftovers() {
   [ -e "$FWD_STATE" ] && { say "left: ip_forward state"; LEFT=$((LEFT + 1)); }
   lan_joined && { say "left: $HOST_LAN_IP on $LAN_BRIDGE"; LEFT=$((LEFT + 1)); }
   [ -e "$LAN_STATE" ] && { say "left: join state"; LEFT=$((LEFT + 1)); }
+  [ -e "$HALT_STATE" ] && { say "left: KVM halt polling not restored"; LEFT=$((LEFT + 1)); }
   return 0
 }
 
@@ -479,8 +572,6 @@ cmd_check() {
     command -v "$c" >/dev/null 2>&1 && say "$c: $(command -v "$c")" || say "$c: MISSING"
   done
   command -v nc >/dev/null 2>&1 && say "nc: $(command -v nc)" || say "nc: MISSING (start cannot wait for LuCI, test cannot run)"
-  command -v gzip >/dev/null 2>&1 && say "gzip: $(command -v gzip)" || say "gzip: MISSING (the installer cannot unpack the release; backups are stored uncompressed)"
-  command -v tar >/dev/null 2>&1 && say "tar: $(command -v tar)" || say "tar: MISSING (the installer cannot unpack the release)"
   ip link show dev "$WAN_IF" >/dev/null 2>&1 && say "cellular $WAN_IF: present" || say "cellular $WAN_IF: MISSING (no data connection?)"
   ip -4 addr show dev "$WAN_IF" 2>/dev/null | sed -n 's/^ *inet /  /p'
   say "ip_forward: $(cat "$IPF" 2>/dev/null)"
@@ -492,7 +583,7 @@ cmd_check() {
   for p in "$SSH_PORT" "$WEB_PORT" 8080; do
     port_busy "$p" && say "host port $p: IN USE" || say "host port $p: free"
   done
-  say "MemAvailable: $(sed -n 's/^MemAvailable:[[:space:]]*//p' /proc/meminfo 2>/dev/null)"
+  say "MemAvailable: $(sed -n 's/^MemAvailable:[[:space:]]*//p' "$MEMINFO" 2>/dev/null)"
   for f in cloud-hypervisor Image rootfs.img; do
     [ -f "$DIR/$f" ] && say "file $f: ok" || say "file $f: MISSING in $DIR"
   done
@@ -550,6 +641,7 @@ cmd_start() {
   fi
   CHPID=$!
   echo "$CHPID" > "$PIDFILE"
+  tune_up
 
   if [ "$mode" = daemon ]; then
     sleep "$START_SLEEP"
@@ -674,167 +766,63 @@ cmd_test() {
   return 1
 }
 
-# ---------------------------------------------------------------- Phase 6: plugin support
-kv() { echo "$1=$2"; }
+# Number of "left:" lines leftovers() prints, without printing them.
+count_leftovers() {
+  leftovers 2>/dev/null | grep -c '^owrt-vm: left:'
+}
 
-# Machine-readable state for the MatchiTOOL plugin: one key=value per line,
-# never fails, never changes anything. "state probe" adds one ping and one
-# LuCI request (about 1-2 s).
+# Keep only characters that are safe in a key=value line.
+kv_clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9._:/-'; }
+
+# state: one key=value per line for the MatchiTOOL plugin. No other text, no
+# die(), exit 0 always: the plugin reads it every few seconds. Values come from
+# vm.conf or the system, so each one is cleaned before it is printed.
 cmd_state() {
-  r=0; is_running && r=1
-  kv manager_api "$MANAGER_API"
-  kv release "$(head -n 1 "$DIR/VERSION" 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
-  kv running "$r"
-  if [ "$r" = 1 ]; then
-    read -r pid < "$PIDFILE"
-    kv pid "$pid"
-    kv etime "$(ps -A -o PID,ETIME 2>/dev/null | awk -v p="$pid" '$1==p{print $2;exit}')"
+  inst=1
+  for f in cloud-hypervisor Image rootfs.img; do [ -f "$DIR/$f" ] || inst=0; done
+  ver=
+  [ -f "$DIR/VERSION" ] && read -r ver < "$DIR/VERSION" 2>/dev/null
+  run=0; pid=; left=-1
+  if is_running; then
+    run=1; read -r pid < "$PIDFILE" 2>/dev/null
+  else
+    left=$(count_leftovers)
   fi
-  j=0; lan_joined && j=1; kv joined "$j"
-  b=0; dhcp_blocked && b=1; kv dhcp_block "$b"
-  for f in cloud-hypervisor Image rootfs.img owrt-vm.sh; do
-    n=0; [ -f "$DIR/$f" ] && n=1
-    kv "file_$(echo "$f" | tr -c 'A-Za-z0-9\n' _)" "$n"
-  done
-  kv net "$NET"; kv lan "$LAN"; kv lan_join "$LAN_JOIN"; kv guest_dhcp4 "$GUEST_DHCP4"
-  kv expose "$EXPOSE"; kv expose_if "$EXPOSE_IF"; kv ssh_port "$SSH_PORT"; kv web_port "$WEB_PORT"
-  kv guest_ip "$GUEST_IP"; kv lan_ip "$LAN_IP"; kv host_lan_ip "$HOST_LAN_IP"
-  kv cpus "$CPUS"; kv mem "$MEM"; kv wan_if "$WAN_IF"; kv dns_up "$DNS_UP"
-  kv mem_avail_kb "$(sed -n 's/^MemAvailable:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null)"
-  if [ "$r" = 0 ]; then leftovers >/dev/null; kv leftovers "$LEFT"; fi
-  if [ "$1" = probe ] && [ "$r" = 1 ]; then
-    p=0; ping -c 1 -W 1 "$GUEST_IP" >/dev/null 2>&1 && p=1; kv guest_ping "$p"
-    w=0; command -v nc >/dev/null 2>&1 && probe_web && w=1; kv luci "$w"
+  joined=0; lan_joined && joined=1
+  blk=0; blksecs=0
+  if dhcp_blocked; then
+    blk=1
+    e=$(cat "$BLOCK_STATE" 2>/dev/null)
+    case $e in ''|*[!0-9]*) e=0 ;; esac
+    now=$(date +%s)
+    [ "$e" -gt "$now" ] && blksecs=$((e - now))
   fi
+  mem=$(sed -n 's/^MemAvailable:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$MEMINFO" 2>/dev/null | head -n 1)
+  fwd=$(head -n 1 "$IPF" 2>/dev/null)
+  echo "installed=$inst"
+  echo "version=$(kv_clean "$ver")"
+  echo "running=$run"
+  echo "pid=$(kv_clean "$pid")"
+  echo "cpus=$(kv_clean "$CPUS")"
+  echo "mem=$(kv_clean "$MEM")"
+  echo "lan=$(kv_clean "$LAN")"
+  echo "joined=$joined"
+  echo "dhcp_block=$blk"
+  echo "dhcp_block_secs=$blksecs"
+  echo "expose=$(kv_clean "$EXPOSE")"
+  echo "guest_dhcp4=$(kv_clean "$GUEST_DHCP4")"
+  echo "leftovers=$left"
+  echo "ip_forward=$(kv_clean "$fwd")"
+  echo "mem_avail_kb=$(kv_clean "$mem")"
   return 0
 }
 
-cmd_version() {
-  say "manager_api=$MANAGER_API release=$(head -n 1 "$DIR/VERSION" 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
-}
-
-# Start detached. The plugin's root command returns at once; start.log gets
-# the progress and, last, "start finished rc=N".
-cmd_start_bg() {
-  is_running && die "already running (pid $(cat "$PIDFILE")); use stop first"
-  mkdir -p "$DIR" || die "cannot create $DIR"
-  : > "$STARTLOG"
-  S=$SELF
-  if command -v setsid >/dev/null 2>&1; then
-    S=$S setsid sh -c 'sh "$S" start; echo "owrt-vm: start finished rc=$?"' >"$STARTLOG" 2>&1 </dev/null &
-  else
-    ( trap '' HUP; S=$S sh -c 'sh "$S" start; echo "owrt-vm: start finished rc=$?"' ) >"$STARTLOG" 2>&1 </dev/null &
-  fi
-  say "start requested (progress: $STARTLOG)"
-}
-
-# Boot entry: the data connection and (for LAN_JOIN=1) the hotspot bridge come
-# up after the boot scripts run, so wait for them, then start. Runs detached.
-cmd_boot() {
-  trap '' HUP
-  is_running && { say "boot: already running"; return 0; }
-  # a reboot leaves state files of a VM that no longer exists: drop them, so
-  # stop can never write an old ip_forward value back
-  rm -f "$FWD_STATE" "$TUN_STATE" "$LAN_STATE" "$BLOCK_STATE"
-  mkdir -p "$DIR" || return 1
-  i=0; net_ok=0; br_ok=0
-  while [ "$i" -lt "$BOOT_NET_WAIT" ]; do
-    net_ok=1
-    if [ "$NET" = 1 ]; then
-      ip link show dev "$WAN_IF" >/dev/null 2>&1 &&
-        ip -4 addr show dev "$WAN_IF" 2>/dev/null | grep -q 'inet ' || net_ok=0
-    fi
-    br_ok=0
-    ip link show dev "$LAN_BRIDGE" >/dev/null 2>&1 && br_ok=1
-    [ "$net_ok" = 1 ] && { [ "$LAN_JOIN" != 1 ] || [ "$br_ok" = 1 ]; } && break
-    # the data connection is required; the hotspot bridge only gets 30 s
-    [ "$net_ok" = 1 ] && [ "$i" -ge 30 ] && break
-    sleep 1; i=$((i + 1))
-  done
-  [ "$net_ok" = 1 ] || { say "boot: $WAN_IF has no address after ${BOOT_NET_WAIT}s (data off?); not starting"; return 1; }
-  if [ "$LAN_JOIN" = 1 ] && [ "$br_ok" != 1 ]; then
-    say "boot: bridge $LAN_BRIDGE not found (hotspot off?); starting WITHOUT the join, use join later"
-    LAN_JOIN=0
-  fi
-  cmd_start
-}
-
-# ---------------------------------------------------------------- Phase 6: backups
-# A backup is a folder backup/YYYYMMDD-HHMMSS with the disk (rootfs.img.gz, or
-# rootfs.img when there is no gzip), vm.conf and the release it belongs to.
-# The guest kernel and its modules come with the release, so a backup only
-# restores onto the same release.
-valid_backup() { case $1 in ''|*[!0-9-]*) return 1 ;; esac; [ -d "$BACKUP_DIR/$1" ]; }
-
-list_backup_names() {
-  for d in "$BACKUP_DIR"/*; do
-    [ -d "$d" ] || continue
-    n=${d##*/}
-    case $n in *[!0-9-]*|'') continue ;; esac
-    echo "$n"
-  done | sort
-}
-
-cmd_backups() {
-  for n in $(list_backup_names); do
-    kb=$(du -k "$BACKUP_DIR/$n" 2>/dev/null | awk '{print $1; exit}')
-    echo "$n ${kb:-0} $(head -n 1 "$BACKUP_DIR/$n/release" 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
-  done
-  return 0
-}
-
-cmd_backup() {
-  is_running && die "stop the VM first (a backup of a running disk is not consistent)"
-  [ -f "$DIR/rootfs.img" ] || die "no $DIR/rootfs.img"
-  name=$(date +%Y%m%d-%H%M%S)
-  tmp=$BACKUP_DIR/$name.tmp
-  [ -e "$BACKUP_DIR/$name" ] && die "a backup named $name already exists; wait a second"
-  mkdir -p "$tmp" || die "cannot create $tmp"
-  if command -v gzip >/dev/null 2>&1; then
-    gzip -c "$DIR/rootfs.img" > "$tmp/rootfs.img.gz" || { rm -rf "$tmp"; die "gzip failed (disk full?)"; }
-  else
-    cp "$DIR/rootfs.img" "$tmp/rootfs.img" || { rm -rf "$tmp"; die "copy failed (disk full?)"; }
-  fi
-  [ -f "$CONF" ] && cp "$CONF" "$tmp/vm.conf"
-  head -n 1 "$DIR/VERSION" 2>/dev/null > "$tmp/release"
-  mv "$tmp" "$BACKUP_DIR/$name" || { rm -rf "$tmp"; die "cannot finish the backup"; }
-  say "backup $name done"
-  # keep the newest BACKUP_KEEP
-  total=$(list_backup_names | wc -l)
-  drop=$((total - BACKUP_KEEP))
-  if [ "$drop" -gt 0 ]; then
-    for old in $(list_backup_names | head -n "$drop"); do
-      rm -rf "$BACKUP_DIR/$old"; say "removed old backup $old (keeping $BACKUP_KEEP)"
-    done
-  fi
-}
-
-cmd_restore() {
-  name=$1
-  [ "$name" = latest ] && name=$(list_backup_names | tail -n 1)
-  valid_backup "$name" || die "no such backup: ${1:-<none>} (sh owrt-vm.sh backups)"
-  is_running && die "stop the VM first"
-  b=$BACKUP_DIR/$name
-  want=$(head -n 1 "$DIR/VERSION" 2>/dev/null | tr -cd 'A-Za-z0-9._-')
-  have=$(head -n 1 "$b/release" 2>/dev/null | tr -cd 'A-Za-z0-9._-')
-  [ "$want" = "$have" ] || die "backup $name is from release '${have:-unknown}', installed is '${want:-unknown}': the guest kernel differs, not restoring"
-  if [ -f "$b/rootfs.img.gz" ]; then
-    command -v gzip >/dev/null 2>&1 || die "gzip missing: cannot unpack $b/rootfs.img.gz"
-    gzip -dc "$b/rootfs.img.gz" > "$DIR/rootfs.img.new" || { rm -f "$DIR/rootfs.img.new"; die "unpack failed (disk full?)"; }
-  elif [ -f "$b/rootfs.img" ]; then
-    cp "$b/rootfs.img" "$DIR/rootfs.img.new" || { rm -f "$DIR/rootfs.img.new"; die "copy failed (disk full?)"; }
-  else
-    die "backup $name has no disk image"
-  fi
-  [ -s "$DIR/rootfs.img.new" ] || { rm -f "$DIR/rootfs.img.new"; die "restored image is empty"; }
-  mv -f "$DIR/rootfs.img.new" "$DIR/rootfs.img" || die "cannot replace rootfs.img"
-  [ -f "$b/vm.conf" ] && cp "$b/vm.conf" "$CONF"
-  say "restored $name (disk and vm.conf)"
-}
-
-cmd_backup_del() {
-  valid_backup "$1" || die "no such backup: ${1:-<none>}"
-  rm -rf "$BACKUP_DIR/$1"; say "backup $1 deleted"
+# gone: silent. Exit 0 only when the VM is stopped and nothing is left behind.
+# This is the plugin's @matchi-check line, so it must never print and never
+# say "gone" when something is still there.
+cmd_gone() {
+  is_running && return 1
+  [ "$(count_leftovers)" -eq 0 ]
 }
 
 cmd_loop() {
@@ -859,16 +847,11 @@ case $1 in
   restart) cmd_stop; cmd_start "$2" ;;
   status) cmd_status ;;
   logs) cmd_logs ;;
+  state) cmd_state ;;
+  gone) cmd_gone ;;
   test) cmd_test ;;
   loop) cmd_loop "$2" ;;
-  state) cmd_state "$2" ;;
-  start-bg) cmd_start_bg ;;
-  boot) cmd_boot ;;
-  version) cmd_version ;;
-  backup) cmd_backup ;;
-  backups) cmd_backups ;;
-  restore) cmd_restore "$2" ;;
-  backup-del) cmd_backup_del "$2" ;;
+  cpu) cmd_cpu "$2" ;;
   join) lan_join ;;
   unjoin) lan_unjoin; say "unjoined: $LAN_TAP is not a port of $LAN_BRIDGE, host $HOST_LAN_IP is back on $LAN_TAP" ;;
   dhcp-block) dhcp_block "$2" ;;
@@ -876,5 +859,5 @@ case $1 in
     if [ "$GUEST_DHCP4" = 1 ] && lan_joined; then
       say "WARNING: GUEST_DHCP4=1 and the LAN is joined: Android's DHCP now runs next to OpenWrt's (two servers). Use unjoin to leave, or dhcp-block 0 to block again."
     fi ;;
-  *) echo "usage: sh owrt-vm.sh check|start [fg]|start-bg|boot|stop|restart|status|state [probe]|version|logs|test|loop N|join|unjoin|dhcp-block [SECONDS]|dhcp-unblock|backup|backups|restore NAME|backup-del NAME"; exit 2 ;;
+  *) echo "usage: sh owrt-vm.sh check|start [fg]|stop|restart|status|logs|state|gone|test|loop N|cpu [SECONDS]|join|unjoin|dhcp-block [SECONDS]|dhcp-unblock"; exit 2 ;;
 esac

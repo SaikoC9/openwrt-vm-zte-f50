@@ -23,7 +23,11 @@ TUN_DEV=$T/dev/tun
 TUN_LINK=$T/dev/net/tun
 CAP_FILE=$T/caps_ok
 TCP_FILES=$T/tcp
+MEMINFO=$T/meminfo
+HALT_FILE=$T/halt
 C
+echo 200000 > "$T/halt"
+printf 'MemTotal:        1500000 kB\nMemAvailable:     123456 kB\n' > "$T/meminfo"
 
 cat > "$BIN/cloud-hypervisor" <<'C'
 #!/bin/sh
@@ -58,8 +62,7 @@ case "$1 $2" in
              [ -n "$n" ] || exit 2; sed "${n}d" "$FAKE/rules" > "$FAKE/r.t"; mv "$FAKE/r.t" "$FAKE/rules" ;;
  "rule show") cat "$FAKE/rules" ;;
  "route show") echo "192.168.0.0/24 dev br0 table br0 proto static scope link" ;;
- "link show") [ "$4" = br0 ] && [ -e "$FAKE/nobr" ] && exit 1
-              [ "$4" = owrt-wan ] && [ ! -e "$FAKE/tap" ] && exit 1
+ "link show") [ "$4" = owrt-wan ] && [ ! -e "$FAKE/tap" ] && exit 1
               [ "$4" = owrt-lan ] && [ ! -e "$FAKE/laptap" ] && exit 1; exit 0 ;;
  "link del") if [ "$3" = owrt-lan ]; then rm -f "$FAKE/laptap"; else rm -f "$FAKE/tap" "$FAKE/addr"; fi ;;
  "link set") : ;;
@@ -213,91 +216,128 @@ M start >"$T/out" 2>&1
 ok "LAN=0 (default): no LAN tap is created" '[ ! -e "$FAKE/laptap" ] && ! grep -q "guest LAN" "$T/out"'
 M stop >/dev/null 2>&1
 
-# ---------------------------------------------------------------- Phase 6: plugin support
-st() { M state "$@" 2>&1; }
-sv() { st ${2:-} | sed -n "s/^$1=//p" | head -n 1; }
-ok "state (stopped): running=0, files, no leftovers, API 1" '[ "$(sv running)" = 0 ] && [ "$(sv manager_api)" = 1 ] && [ "$(sv file_Image)" = 1 ] && [ "$(sv file_rootfs_img)" = 1 ] && [ "$(sv file_cloud_hypervisor)" = 1 ] && [ "$(sv leftovers)" = 0 ] && [ -z "$(sv pid)" ]'
-echo "1.0.0" > "$OWRT_DIR/VERSION"
-ok "state shows the installed release" '[ "$(sv release)" = 1.0.0 ]'
+
+# Phase 6 step 3: state, gone, DIR default
+state_ok() { ! grep -qvE '^[a-z_0-9]+=[A-Za-z0-9._:/-]*$' "$1"; }
+val() { sed -n "s/^$1=//p" "$T/st"; }
+M state >"$T/st" 2>&1; rc=$?
+ok "state (stopped): exit 0, only key=value lines" '[ $rc -eq 0 ] && state_ok "$T/st" && [ "$(grep -c "" "$T/st")" = 15 ]'
+ok "state (stopped): running 0, no pid, leftovers 0, installed 1" '[ "$(val running)" = 0 ] && [ -z "$(val pid)" ] && [ "$(val leftovers)" = 0 ] && [ "$(val installed)" = 1 ]'
+ok "state: ip_forward and mem_avail_kb read from the system" '[ "$(val ip_forward)" = 0 ] && [ "$(val mem_avail_kb)" = 123456 ]'
+ok "state: settings echoed (cpus, mem, lan, expose, guest_dhcp4)" '[ "$(val cpus)" = 2 ] && [ "$(val mem)" = 256M ] && [ "$(val lan)" = 0 ] && [ "$(val expose)" = 0 ] && [ "$(val guest_dhcp4)" = 0 ]'
+ok "state: version empty without a VERSION file" '[ -z "$(val version)" ] && grep -q "^version=$" "$T/st"'
+printf '0.1.0\nsecond line\n' > "$OWRT_DIR/VERSION"
+M state >"$T/st" 2>&1
+ok "state: version is the first line of VERSION" '[ "$(val version)" = 0.1.0 ]'
+printf '0.1.0 $(id);`x`\n' > "$OWRT_DIR/VERSION"
+M state >"$T/st" 2>&1
+ok "state: odd characters in VERSION are dropped" 'state_ok "$T/st" && [ "$(val version)" = 0.1.0idx ]'
+rm -f "$OWRT_DIR/VERSION"
+mv "$OWRT_DIR/rootfs.img" "$T/rootfs.keep"
+M state >"$T/st" 2>&1
+ok "state: installed 0 when a file is missing" '[ "$(val installed)" = 0 ]'
+mv "$T/rootfs.keep" "$OWRT_DIR/rootfs.img"
+M gone >"$T/out" 2>&1; rc=$?
+ok "gone (stopped, clean): exit 0 and silent" '[ $rc -eq 0 ] && [ ! -s "$T/out" ]'
+touch "$FAKE/laptap"
+M gone >"$T/out" 2>&1; rc=$?
+ok "gone with a leftover tap: exit 1 and silent" '[ $rc -eq 1 ] && [ ! -s "$T/out" ]'
+M state >"$T/st" 2>&1
+ok "state counts the leftover (leftovers 1)" '[ "$(val leftovers)" = 1 ] && [ "$(val running)" = 0 ]'
+rm -f "$FAKE/laptap"
+echo "LAN=1" >> "$OWRT_DIR/vm.conf"; echo "GUEST_DHCP4=1" >> "$OWRT_DIR/vm.conf"
+M start >"$T/out" 2>&1
+M state >"$T/st" 2>&1
+ok "state (running): running 1, numeric pid, leftovers -1" '[ "$(val running)" = 1 ] && case $(val pid) in ""|*[!0-9]*) false ;; esac && [ "$(val leftovers)" = -1 ] && state_ok "$T/st"'
+ok "state (running): ip_forward 1, lan 1, joined 0, no block" '[ "$(val ip_forward)" = 1 ] && [ "$(val lan)" = 1 ] && [ "$(val joined)" = 0 ] && [ "$(val dhcp_block)" = 0 ] && [ "$(val dhcp_block_secs)" = 0 ] && [ "$(val guest_dhcp4)" = 1 ]'
+M gone >"$T/out" 2>&1; rc=$?
+ok "gone while running: exit 1 and silent" '[ $rc -eq 1 ] && [ ! -s "$T/out" ]'
+M dhcp-block 100 >/dev/null 2>&1
+M state >"$T/st" 2>&1
+ok "state: dhcp_block 1 with seconds left" '[ "$(val dhcp_block)" = 1 ] && [ "$(val dhcp_block_secs)" -ge 90 ] && [ "$(val dhcp_block_secs)" -le 100 ]'
+M dhcp-unblock >/dev/null 2>&1; M dhcp-block 0 >/dev/null 2>&1
+M state >"$T/st" 2>&1
+ok "state: block without timer has dhcp_block_secs 0" '[ "$(val dhcp_block)" = 1 ] && [ "$(val dhcp_block_secs)" = 0 ]'
+M stop >/dev/null 2>&1
+M state >"$T/st" 2>&1
+ok "state after stop: running 0, leftovers 0, block 0" '[ "$(val running)" = 0 ] && [ "$(val leftovers)" = 0 ] && [ "$(val dhcp_block)" = 0 ] && [ "$(val ip_forward)" = 0 ]'
+M gone >"$T/out" 2>&1; rc=$?
+ok "gone after stop: exit 0 and silent" '[ $rc -eq 0 ] && [ ! -s "$T/out" ] && clean'
+sed -i '/^GUEST_DHCP4=1$/d;/^LAN=1$/d' "$OWRT_DIR/vm.conf"
+# a broken pidfile and a stale tap must not make state die or print noise
+echo garbage > "$OWRT_DIR/run/vm.pid"
+M state >"$T/st" 2>&1; rc=$?
+ok "state with a garbage pidfile: exit 0, running 0" '[ $rc -eq 0 ] && [ "$(val running)" = 0 ] && state_ok "$T/st"'
+rm -f "$OWRT_DIR/run/vm.pid"
+# DIR defaults to the folder of the script when OWRT_DIR is not set
+mkdir -p "$T/own"; cp "$HERE/owrt-vm.sh" "$T/own/owrt-vm.sh"; cp "$OWRT_DIR/vm.conf" "$T/own/vm.conf"
+cp "$OWRT_DIR/Image" "$OWRT_DIR/rootfs.img" "$OWRT_DIR/cloud-hypervisor" "$T/own/"
+( unset OWRT_DIR; sh "$T/own/owrt-vm.sh" state >"$T/st" 2>&1 )
+ok "no OWRT_DIR: DIR is the script's folder (files found there)" '[ "$(val installed)" = 1 ]'
+rm -f "$T/own/Image"
+( unset OWRT_DIR; cd "$T/own" && sh owrt-vm.sh check >"$T/out" 2>&1 )
+ok "no OWRT_DIR, started as 'sh owrt-vm.sh' inside the folder" 'grep -q "file Image: MISSING in $T/own\$" "$T/out" && grep -q "file rootfs.img: ok" "$T/out"'
+( unset OWRT_DIR; cd "$T" && sh ./own/owrt-vm.sh check >"$T/out" 2>&1 )
+ok "no OWRT_DIR, started with a relative path: DIR is absolute" 'grep -q "file Image: MISSING in $T/own\$" "$T/out"'
+( cd "$T/own" && OWRT_DIR=$OWRT_DIR sh owrt-vm.sh check >"$T/out" 2>&1 )
+ok "OWRT_DIR set: it wins over the script's folder" 'grep -q "file Image: ok" "$T/out"'
+M usage_probe >"$T/out" 2>&1; rc=$?
+ok "usage line lists state and gone, exit 2" '[ $rc -eq 2 ] && grep -q "state|gone" "$T/out"'
+rm -rf "$T/own"
+
+# idle CPU: halt polling switch and the cpu command
+halt() { cat "$T/halt"; }
+M start >"$T/out" 2>&1
+ok "halt polling: 0 while the VM runs, old value saved" '[ "$(halt)" = 0 ] && [ "$(cat "$OWRT_DIR/run/halt_poll_ns")" = 200000 ] && grep -q "halt polling 200000 -> 0" "$T/out"'
+M cpu 1 >"$T/out" 2>&1; rc=$?
+ok "cpu while running: exit 0, header, vcpu/other totals, halt value" '[ $rc -eq 0 ] && grep -q "CPU over 1s, 100% = one core (cpus=2" "$T/out" && grep -q "vcpu threads: [0-9]*\.[0-9]%   other VMM threads: [0-9]*\.[0-9]%" "$T/out" && grep -q "halt_poll_ns now: 0 (HALT_POLL=0)" "$T/out"'
+ok "cpu leaves no temp files" '[ ! -e "$OWRT_DIR/run/cpu.a" ] && [ ! -e "$OWRT_DIR/run/cpu.b" ] && [ ! -e "$OWRT_DIR/run/cpu.d" ]'
+M cpu abc >"$T/out" 2>&1; rc=$?
+ok "cpu with a bad number: refused" '[ $rc -ne 0 ] && grep -q "usage: sh owrt-vm.sh cpu" "$T/out"'
+M gone >"$T/out" 2>&1; rc=$?
+ok "gone while running with halt state: still exit 1, silent" '[ $rc -eq 1 ] && [ ! -s "$T/out" ]'
+M stop >"$T/out" 2>&1
+ok "stop restores halt polling and leaves nothing" '[ "$(halt)" = 200000 ] && [ ! -e "$OWRT_DIR/run/halt_poll_ns" ] && clean && grep -q "clean: no leftovers" "$T/out"'
+M cpu >"$T/out" 2>&1; rc=$?
+ok "cpu with the VM stopped: refused" '[ $rc -ne 0 ] && grep -q "VM is not running" "$T/out"'
+
+FAKE_CH_FAIL=1 M start >"$T/out" 2>&1; rc=$?
+ok "failed start: halt polling untouched or restored" '[ $rc -ne 0 ] && [ "$(halt)" = 200000 ] && [ ! -e "$OWRT_DIR/run/halt_poll_ns" ] && clean'
+
+echo "HALT_POLL=" >> "$OWRT_DIR/vm.conf"
+M start >"$T/out" 2>&1
+ok "HALT_POLL empty: host value left alone, no state file" '[ "$(halt)" = 200000 ] && [ ! -e "$OWRT_DIR/run/halt_poll_ns" ] && ! grep -q "halt polling" "$T/out"'
+M stop >/dev/null 2>&1
+sed -i '/^HALT_POLL=$/d' "$OWRT_DIR/vm.conf"
+
+echo "HALT_POLL=20000" >> "$OWRT_DIR/vm.conf"
+M start >"$T/out" 2>&1
+ok "HALT_POLL=20000: that value while running" '[ "$(halt)" = 20000 ]'
+M stop >/dev/null 2>&1
+ok "HALT_POLL=20000: restored on stop" '[ "$(halt)" = 200000 ] && clean'
+sed -i '/^HALT_POLL=20000$/d' "$OWRT_DIR/vm.conf"
+
+echo "HALT_POLL=fast" >> "$OWRT_DIR/vm.conf"
+M start >"$T/out" 2>&1; rc=$?
+ok "HALT_POLL not a number: VM starts, value untouched, says so" '[ $rc -eq 0 ] && [ "$(halt)" = 200000 ] && grep -q "HALT_POLL must be a number" "$T/out"'
+M stop >/dev/null 2>&1
+sed -i '/^HALT_POLL=fast$/d' "$OWRT_DIR/vm.conf"
+
+sed -i "s#^HALT_FILE=.*#HALT_FILE=$T/nothere#" "$OWRT_DIR/vm.conf"
+M start >"$T/out" 2>&1; rc=$?
+ok "no halt_poll_ns file: VM starts and says it left it alone" '[ $rc -eq 0 ] && grep -q "not writable, left alone" "$T/out"'
+M stop >/dev/null 2>&1
+sed -i "s#^HALT_FILE=.*#HALT_FILE=$T/halt#" "$OWRT_DIR/vm.conf"
+
+# a crash leaves the state file: gone says no, the next start keeps the FIRST value, stop restores it
+mkdir -p "$OWRT_DIR/run"; echo 200000 > "$OWRT_DIR/run/halt_poll_ns"; echo 0 > "$T/halt"
+M gone >"$T/out" 2>&1; rc=$?
+ok "stale halt state: gone exit 1 (leftover)" '[ $rc -eq 1 ]'
 M start >/dev/null 2>&1
-ok "state (running): running=1, pid, settings as key=value" '[ "$(sv running)" = 1 ] && [ -n "$(sv pid)" ] && [ "$(sv cpus)" = 2 ] && [ "$(sv mem)" = 256M ] && [ "$(sv expose)" = 0 ] && [ "$(sv guest_ip)" = 192.168.66.2 ] && [ "$(sv web_port)" = 8081 ]'
-ok "state has no leftovers key while running" '[ -z "$(sv leftovers)" ]'
-ok "state probe: guest_ping=1 and luci=1" '[ "$(sv guest_ping probe)" = 1 ] && [ "$(sv luci probe)" = 1 ]'
-ok "state without probe does not ping" '[ -z "$(sv guest_ping)" ]'
-M stop >/dev/null 2>&1
-ok "state: every line is key=value (no stray output)" '! st | grep -v "^[A-Za-z0-9_]*=" | grep -q .'
+M stop >"$T/out" 2>&1
+ok "stale halt state: stop restores the first saved value" '[ "$(halt)" = 200000 ] && clean'
 
-# start-bg: returns at once, start.log ends with the result
-rm -f "$OWRT_DIR/start.log"
-M start-bg >"$T/out" 2>&1; rc=$?
-ok "start-bg returns 0 and says where the progress is" '[ $rc -eq 0 ] && grep -q "start requested" "$T/out"'
-i=0; while [ $i -lt 20 ] && ! grep -q "start finished rc=" "$OWRT_DIR/start.log" 2>/dev/null; do sleep 1; i=$((i+1)); done
-ok "start-bg: start.log ends with rc=0 and the VM runs" 'grep -q "start finished rc=0" "$OWRT_DIR/start.log" && grep -q "guest answers" "$OWRT_DIR/start.log" && [ "$(sv running)" = 1 ]'
-M start-bg >"$T/out" 2>&1; rc=$?
-ok "start-bg while running is refused" '[ $rc -ne 0 ] && grep -q "already running" "$T/out"'
-M stop >/dev/null 2>&1
-FAKE_CH_FAIL=1 M start-bg >/dev/null 2>&1
-i=0; while [ $i -lt 20 ] && ! grep -q "start finished rc=" "$OWRT_DIR/start.log" 2>/dev/null; do sleep 1; i=$((i+1)); done
-ok "start-bg: a failing start is reported as rc=1 and leaves nothing" 'grep -q "start finished rc=1" "$OWRT_DIR/start.log" && clean'
-
-# boot: waits for the data connection, then starts
-echo "BOOT_NET_WAIT=3" >> "$OWRT_DIR/vm.conf"
-M boot >"$T/out" 2>&1; rc=$?
-ok "boot without a data connection: not started, clear message" '[ $rc -ne 0 ] && grep -q "has no address after 3s" "$T/out" && clean'
-touch "$FAKE/addr"
-echo 1 > "$T/ipf"; mkdir -p "$OWRT_DIR/run"; echo 0 > "$OWRT_DIR/run/ip_forward"
-M boot >"$T/out" 2>&1; rc=$?
-ok "boot with a data connection: VM runs" '[ $rc -eq 0 ] && [ "$(sv running)" = 1 ]'
-M boot >"$T/out" 2>&1
-ok "boot while running does nothing" 'grep -q "boot: already running" "$T/out"'
-M stop >/dev/null 2>&1
-ok "boot dropped the stale ip_forward state: stop leaves Android's value (1)" '[ "$(cat "$T/ipf")" = 1 ] && [ "$(sv leftovers)" = 0 ]'
-echo 0 > "$T/ipf"
-rm -f "$FAKE/addr"
-touch "$FAKE/addr" "$FAKE/nobr"
-printf 'LAN=1\nLAN_JOIN=1\nGUEST_DHCP4=1\n' >> "$OWRT_DIR/vm.conf"
-M boot >"$T/out" 2>&1; rc=$?
-ok "boot with LAN_JOIN=1 but no bridge: starts without the join" '[ $rc -eq 0 ] && grep -q "starting WITHOUT the join" "$T/out" && [ "$(sv running)" = 1 ] && [ "$(sv joined)" = 0 ]'
-M stop >/dev/null 2>&1
-rm -f "$FAKE/nobr" "$FAKE/addr"
-sed -i '/^LAN=1$/d;/^LAN_JOIN=1$/d;/^GUEST_DHCP4=1$/d;/^BOOT_NET_WAIT=/d' "$OWRT_DIR/vm.conf"
-
-# version
-M version >"$T/out" 2>&1
-ok "version prints the API and the release" 'grep -q "manager_api=1 release=1.0.0" "$T/out"'
-
-# backups
-echo "disk-v1" > "$OWRT_DIR/rootfs.img"
-M backup >"$T/out" 2>&1; rc=$?
-ok "backup of a stopped VM works" '[ $rc -eq 0 ] && grep -q "backup [0-9-]* done" "$T/out"'
-ok "backups lists it with size and release" '[ "$(M backups | wc -l)" = 1 ] && M backups | grep -q " 1.0.0$"'
-echo "disk-v2" > "$OWRT_DIR/rootfs.img"
-M restore latest >"$T/out" 2>&1; rc=$?
-ok "restore latest puts the disk back" '[ $rc -eq 0 ] && [ "$(cat "$OWRT_DIR/rootfs.img")" = disk-v1 ] && grep -q "restored" "$T/out"'
-echo "disk-v3" > "$OWRT_DIR/rootfs.img"
-echo "2.0.0" > "$OWRT_DIR/VERSION"
-M restore latest >"$T/out" 2>&1; rc=$?
-ok "restore onto another release is refused, disk untouched" '[ $rc -ne 0 ] && grep -q "guest kernel differs" "$T/out" && [ "$(cat "$OWRT_DIR/rootfs.img")" = disk-v3 ]'
-echo "1.0.0" > "$OWRT_DIR/VERSION"
-M start >/dev/null 2>&1
-M backup >"$T/out" 2>&1; rc=$?
-ok "backup while the VM runs is refused" '[ $rc -ne 0 ] && grep -q "stop the VM first" "$T/out"'
-M restore latest >"$T/out" 2>&1; rc=$?
-ok "restore while the VM runs is refused" '[ $rc -ne 0 ] && grep -q "stop the VM first" "$T/out"'
-M stop >/dev/null 2>&1
-M restore ../etc >"$T/out" 2>&1; rc=$?
-ok "a path as backup name is refused" '[ $rc -ne 0 ] && grep -q "no such backup" "$T/out"'
-M restore 20990101-000000 >"$T/out" 2>&1; rc=$?
-ok "an unknown backup name is refused" '[ $rc -ne 0 ] && grep -q "no such backup" "$T/out"'
-rm -rf "$OWRT_DIR/backup"; mkdir -p "$OWRT_DIR/backup/20260101-000001" "$OWRT_DIR/backup/20260101-000002"
-echo 1.0.0 > "$OWRT_DIR/backup/20260101-000001/release"; echo 1.0.0 > "$OWRT_DIR/backup/20260101-000002/release"
-echo "BACKUP_KEEP=2" >> "$OWRT_DIR/vm.conf"
-M backup >"$T/out" 2>&1
-ok "backup keeps only the newest BACKUP_KEEP" '[ "$(M backups | wc -l)" = 2 ] && [ ! -d "$OWRT_DIR/backup/20260101-000001" ] && [ -d "$OWRT_DIR/backup/20260101-000002" ] && grep -q "removed old backup 20260101-000001" "$T/out"'
-M backup-del 20260101-000002 >/dev/null 2>&1
-ok "backup-del removes one backup" '[ ! -d "$OWRT_DIR/backup/20260101-000002" ] && [ "$(M backups | wc -l)" = 1 ]'
-M backup-del ../x >"$T/out" 2>&1; rc=$?
-ok "backup-del refuses a path" '[ $rc -ne 0 ]'
-sed -i '/^BACKUP_KEEP=/d' "$OWRT_DIR/vm.conf"
+M usage_probe >"$T/out" 2>&1
+ok "usage line lists cpu" 'grep -q "cpu \[SECONDS\]" "$T/out"'
 
 echo "passed $pass, failed $fail"; [ "$fail" -eq 0 ]

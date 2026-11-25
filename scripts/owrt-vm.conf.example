@@ -2,6 +2,7 @@
 # This file is read as shell. Root-owned, do not put untrusted text in it.
 CPUS=2
 MEM=256M
+HALT_POLL=0              # KVM halt polling (ns) while the VM runs; 0 = off, empty = leave the host as is
 NET=1                    # 0 = boot with no network at all
 WAN_IF=sipa_eth0         # cellular interface of the F50
 DNS_UP=8.8.8.8           # upstream DNS the guest's queries are sent to
@@ -23,8 +24,3 @@ WEB_PORT=8081            # host port -> guest 80 (LuCI). Not 8080: it is used on
 # 192.168.88.2 <-> guest 192.168.88.1. NOT joined to br0: the hotspot and
 # Android's DHCP are not touched. Needs NET=1.
 LAN=0
-
-# Phase 6 (MatchiTOOL plugin). The plugin writes its own block into vm.conf;
-# these are the manager-side settings it does not touch.
-BOOT_NET_WAIT=120        # "boot": seconds to wait for the data connection (the hotspot bridge gets 30 s)
-BACKUP_KEEP=3            # "backup" keeps the newest N backups
