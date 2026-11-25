@@ -1,144 +1,147 @@
-name: Release OpenWrt VM (GitHub release + plugin pin)
+name: Release OpenWrt VM
 
-# Packages two finished CI builds into the release (openwrt-vm-arm64.tar.gz, MANIFEST, SHA256SUMS), publishes the GitHub
-# release and prints the PIN_SUMS_SHA256 for the plugin. Nothing is rebuilt: give it the
-# run numbers of a green "Build OpenWrt VM tools (arm64)" run and a green
-# "Build OpenWrt guest" run (the number in the run's address: .../actions/runs/NUMBER).
-
+# Tag vMAJOR.MINOR.PATCH (for example v0.1.0) builds everything from that commit and publishes a
+# GitHub Release with: Image, rootfs.img.gz, cloud-hypervisor, owrt-vm.sh, owrt-vm.conf.example,
+# owrt-kvmprobe, owrt-fwd (when it exists), owrt-manifest.json, SHA256SUMS.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# By hand (Actions, Run workflow) it does the same build and checks, enters a version, and stops
+# before publishing: use it as a dry run. The long part is the OpenWrt guest build (about 1 hour).
 on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
       version:
-        description: "Version X.Y.Z (the release tag becomes vX.Y.Z)"
+        description: "Version for the dry run, MAJOR.MINOR.PATCH (no leading v)"
         required: true
         type: string
-      host_run_id:
-        description: "Run number of Build OpenWrt VM tools (artifact owrt-vm-arm64)"
-        required: true
-        type: string
-      guest_run_id:
-        description: "Run number of Build OpenWrt guest (artifact owrt-guest-arm64)"
-        required: true
-        type: string
-      expect_pin:
-        description: "Optional: PIN_SUMS_SHA256 you expect. The job stops before publishing if it differs."
-        required: false
-        type: string
-      open_pin_pr:
-        description: "Open a pull request that sets the new pin in the plugin"
-        required: false
-        default: true
-        type: boolean
 
 permissions:
-  contents: write
-  pull-requests: write
-  actions: read
+  contents: read
 
 concurrency:
-  group: release-owrt-vm
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ inputs.version }}
-      HOST_RUN: ${{ inputs.host_run_id }}
-      GUEST_RUN: ${{ inputs.guest_run_id }}
-      EXPECT_PIN: ${{ inputs.expect_pin }}
+    timeout-minutes: 340
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Check the inputs
+      - name: Version
+        id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          set -euo pipefail
-          [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must look like 1.2.3"; exit 1; }
-          [[ $HOST_RUN =~ ^[0-9]+$ ]] || { echo "host_run_id must be a number"; exit 1; }
-          [[ $GUEST_RUN =~ ^[0-9]+$ ]] || { echo "guest_run_id must be a number"; exit 1; }
-          [[ -z $EXPECT_PIN || $EXPECT_PIN =~ ^[0-9a-f]{64}$ ]] || { echo "expect_pin must be 64 hex characters"; exit 1; }
-          if gh release view "v$VERSION" >/dev/null 2>&1; then
-            echo "release v$VERSION already exists: pick a new version (a published release is never overwritten)"; exit 1
+          if [ "$EVENT" = push ]; then v="${GITHUB_REF_NAME#v}"; else v="$INPUT_VERSION"; fi
+          if ! printf '%s' "$v" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "bad version '$v' (want MAJOR.MINOR.PATCH)"; exit 1
           fi
-
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Release version: $v"
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.26.10"
+          cache: false
       - name: Script tests
         run: |
           bash scripts/test_owrt_build.sh
-          bash scripts/test_owrt_vm.sh
-          bash scripts/test_owrt_install.sh
-          node scripts/sync_plugin.js --check
-          node tests/test_plugin.js
-
-      - name: Download the two builds
+          bash scripts/test_owrt_release.sh
+          bash scripts/test_guest.sh
+      - name: Build dependencies
         run: |
-          set -euo pipefail
-          gh run download "$HOST_RUN" --repo "$GITHUB_REPOSITORY" --name owrt-vm-arm64 --dir build/host
-          gh run download "$GUEST_RUN" --repo "$GITHUB_REPOSITORY" --name owrt-guest-arm64 --dir build/guest
-          ls -l build/host build/guest
-
-      - name: Package the release
-        id: pack
-        run: |
-          set -euo pipefail
-          bash scripts/owrt-release.sh --build build/host --guest build/guest --version "$VERSION" --out "$PWD/dist/release" | tee pack.log
-          pin=$(sed -n 's/^PIN_SUMS_SHA256=//p' pack.log | tail -n 1)
-          [[ $pin =~ ^[0-9a-f]{64}$ ]] || { echo "no pin in the packager output"; exit 1; }
-          [ "$(sha256sum dist/release/SHA256SUMS | cut -d' ' -f1)" = "$pin" ] || { echo "pin does not match SHA256SUMS"; exit 1; }
-          echo "pin=$pin" >> "$GITHUB_OUTPUT"
-
-      - name: Compare with the expected pin
-        if: ${{ inputs.expect_pin != '' }}
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git \
+            libncurses5-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget \
+            qemu-system-arm curl
+      - name: Build tools and host
         env:
-          PIN: ${{ steps.pack.outputs.pin }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          [ "$PIN" = "$EXPECT_PIN" ] || { echo "pin $PIN differs from the expected $EXPECT_PIN: not publishing"; exit 1; }
-
-      - name: Publish the GitHub release
+          bash scripts/owrt-build.sh --version "$VERSION" --out dist/owrt tools host
+          bash scripts/owrt-build.sh --verify dist/owrt
+      - name: Work folder on the big disk
         run: |
-          set -euo pipefail
-          cd dist/release
-          gh release create "v$VERSION" openwrt-vm-arm64.tar.gz MANIFEST SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v$VERSION" \
-            --notes "OpenWrt VM release $VERSION. Plugin pin (SHA-256 of SHA256SUMS): ${{ steps.pack.outputs.pin }}"
-
+          sudo mkdir -p /mnt/owrt-work && sudo chown "$USER" /mnt/owrt-work
+          df -h / /mnt
+      - name: Build guest
+        env:
+          OWRT_GUEST_WORK: /mnt/owrt-work
+        run: bash scripts/owrt-build.sh guest --out dist/guest
+      - name: Boot in QEMU, ask LuCI
+        run: bash scripts/owrt-qemu-smoke.sh --dir dist/guest --require --luci --timeout 600
+      - name: Assemble release folder
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: bash scripts/owrt-release.sh --version "$VERSION" --tools dist/owrt --guest dist/guest --out dist/release
       - name: Summary
-        env:
-          PIN: ${{ steps.pack.outputs.pin }}
         run: |
           {
-            echo "## Release v$VERSION published"
-            echo
-            echo "Set in the plugin:"
-            echo '```'
-            echo "const RELEASE_TAG = 'v$VERSION';"
-            echo "const PIN_SUMS_SHA256 = '$PIN';"
-            echo '```'
-            echo '```'
-            cat dist/release/SHA256SUMS
-            echo '```'
+            echo "## Release ${{ steps.ver.outputs.version }}"
+            echo '```'; cat dist/release/SHA256SUMS; echo '```'
+            echo "Plugin pin, sha256 of owrt-manifest.json: \`$(sha256sum dist/release/owrt-manifest.json | cut -d' ' -f1)\`"
           } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: owrt-release
+          path: dist/release/
+          if-no-files-found: error
 
-      - name: Open a pull request with the new pin
-        if: ${{ inputs.open_pin_pr }}
-        continue-on-error: true
-        env:
-          PIN: ${{ steps.pack.outputs.pin }}
+  publish:
+    # Tags only. A manual run ends after "build".
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write   # create the release
+      actions: read     # download the artifact of this run
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Get the built folder
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -n owrt-release -D dist/release
+      - name: Verify before publishing
+        run: bash scripts/owrt-release.sh --verify dist/release --version "$VERSION"
+      - name: Release notes
         run: |
-          set -euo pipefail
-          f=plugin/OpenWrt_VM_v1_0.js
-          sed -i "s/^  const RELEASE_TAG = '.*';/  const RELEASE_TAG = 'v$VERSION';/" "$f"
-          sed -i "s/^  const PIN_SUMS_SHA256 = '[0-9a-f]*';/  const PIN_SUMS_SHA256 = '$PIN';/" "$f"
-          node scripts/sync_plugin.js --check
-          if git diff --quiet -- "$f"; then echo "plugin already has this tag and pin"; exit 0; fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          br="pin-v$VERSION"
-          git checkout -b "$br"
-          git add "$f"
-          git commit -m "Pin plugin to release v$VERSION"
-          git push origin "$br"
-          gh pr create --title "Pin plugin to release v$VERSION" \
-            --body "Sets RELEASE_TAG v$VERSION and PIN_SUMS_SHA256 $PIN. Opened by the release workflow." \
-            --base "${GITHUB_REF_NAME}" --head "$br"
+          pin=$(sha256sum dist/release/owrt-manifest.json | cut -d' ' -f1)
+          {
+            echo "OpenWrt $VERSION guest for the F50, built from tag $TAG ($GITHUB_SHA)."
+            echo
+            echo "Plugin pin (sha256 of owrt-manifest.json): \`$pin\`"
+            echo
+            echo "Verify on a PC, no checkout needed:"
+            echo
+            echo '```'
+            echo "mkdir owrt-$VERSION && cd owrt-$VERSION"
+            echo "gh release download $TAG --repo $GITHUB_REPOSITORY"
+            echo "sha256sum -c SHA256SUMS"
+            echo '```'
+          } > dist/notes.md
+          cat dist/notes.md
+      - name: Create the release
+        run: |
+          gh release create "$TAG" dist/release/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "OpenWrt VM $TAG" --notes-file dist/notes.md
+      - name: Download the published assets and verify them
+        run: |
+          mkdir -p dist/check
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -D dist/check
+          ( cd dist/check && sha256sum -c SHA256SUMS )
+          bash scripts/owrt-release.sh --verify dist/check --version "$VERSION"
+          cmp dist/check/owrt-manifest.json dist/release/owrt-manifest.json
+          echo "published release $TAG verified: $(ls dist/check | wc -l) assets"
