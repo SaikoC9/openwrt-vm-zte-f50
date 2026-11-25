@@ -1,8 +1,8 @@
 name: Release OpenWrt VM
 
 # Run workflow (Actions) builds everything from that commit and publishes a GitHub Release
-# with: Image, rootfs.img.gz, cloud-hypervisor, owrt-vm.sh, owrt-vm.conf.example, owrt-kvmprobe,
-# owrt-fwd (when it exists), owrt-manifest.json, SHA256SUMS. Nothing to type: the version is
+# with ONE bundle, openwrt-vm-arm64.tar.gz (owrt-vm.sh, cloud-hypervisor, Image, rootfs.img),
+# plus the two small files MANIFEST and SHA256SUMS. Nothing to type: the version is
 # picked automatically. The first release is v1.0.0, every next one raises the patch number
 # of the highest vX.Y.Z tag (v1.0.1, v1.0.2, ...). Pushing a tag vMAJOR.MINOR.PATCH by hand
 # also works and uses that tag. The long part is the OpenWrt guest build (about 1 hour).
@@ -57,6 +57,7 @@ jobs:
         run: |
           bash scripts/test_owrt_build.sh
           bash scripts/test_owrt_release.sh
+          bash scripts/test_owrt_install.sh
           bash scripts/test_guest.sh
       - name: Build dependencies
         # No gcc-multilib here: on this image it conflicts with the arm64 cross compiler
@@ -91,13 +92,13 @@ jobs:
       - name: Assemble release folder
         env:
           VERSION: ${{ steps.ver.outputs.version }}
-        run: bash scripts/owrt-release.sh --version "$VERSION" --tools dist/owrt --guest dist/guest --out dist/release
+        run: bash scripts/owrt-release.sh --version "$VERSION" --build dist/owrt --guest dist/guest --out dist/release
       - name: Summary
         run: |
           {
             echo "## Release ${{ steps.ver.outputs.version }}"
             echo '```'; cat dist/release/SHA256SUMS; echo '```'
-            echo "Plugin pin, sha256 of owrt-manifest.json: \`$(sha256sum dist/release/owrt-manifest.json | cut -d' ' -f1)\`"
+            echo "Plugin pin (PIN_SUMS_SHA256), sha256 of SHA256SUMS: \`$(sha256sum dist/release/SHA256SUMS | cut -d' ' -f1)\`"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -124,11 +125,11 @@ jobs:
         run: bash scripts/owrt-release.sh --verify dist/release --version "$VERSION"
       - name: Release notes
         run: |
-          pin=$(sha256sum dist/release/owrt-manifest.json | cut -d' ' -f1)
+          pin=$(sha256sum dist/release/SHA256SUMS | cut -d' ' -f1)
           {
             echo "OpenWrt $VERSION guest for the F50, built from tag $TAG ($GITHUB_SHA)."
             echo
-            echo "Plugin pin (sha256 of owrt-manifest.json): \`$pin\`"
+            echo "Plugin pin (PIN_SUMS_SHA256, sha256 of SHA256SUMS): \`$pin\`"
             echo
             echo "Verify on a PC, no checkout needed:"
             echo
@@ -150,5 +151,5 @@ jobs:
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -D dist/check
           ( cd dist/check && sha256sum -c SHA256SUMS )
           bash scripts/owrt-release.sh --verify dist/check --version "$VERSION"
-          cmp dist/check/owrt-manifest.json dist/release/owrt-manifest.json
+          cmp dist/check/SHA256SUMS dist/release/SHA256SUMS
           echo "published release $TAG verified: $(ls dist/check | wc -l) assets"
