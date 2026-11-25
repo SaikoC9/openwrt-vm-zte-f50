@@ -50,6 +50,9 @@ case $OUT in /*) ;; *) OUT="$PWD/$OUT" ;; esac
 for t in sha256sum gzip tar; do command -v "$t" >/dev/null 2>&1 || die "$t not found"; done
 [ -d "$BUILD" ] || die "$BUILD is not a directory"
 [ -d "$GUEST" ] || die "$GUEST is not a directory"
+# absolute paths: the bundle is packed from a temp folder of links, which would not resolve relative ones
+BUILD=$(cd "$BUILD" && pwd)
+GUEST=$(cd "$GUEST" && pwd)
 bash "$ROOT/scripts/owrt-build.sh" --verify "$BUILD" >/dev/null || die "$BUILD does not verify against its SHA256SUMS"
 [ "$GUEST" = "$BUILD" ] || bash "$ROOT/scripts/owrt-build.sh" --verify "$GUEST" >/dev/null || die "$GUEST does not verify against its SHA256SUMS"
 [ -f "$BUILD/cloud-hypervisor" ] || die "$BUILD/cloud-hypervisor is missing (build the host stage first)"

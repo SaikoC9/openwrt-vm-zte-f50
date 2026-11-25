@@ -70,6 +70,8 @@ cp "$T/build/cloud-hypervisor" "$T/hostdir/"; cp "$T/build/Image" "$T/build/root
 ( cd "$T/hostdir" && sha256sum cloud-hypervisor > SHA256SUMS ); ( cd "$T/guestdir" && sha256sum Image rootfs.img > SHA256SUMS )
 bash "$HERE/owrt-release.sh" --build "$T/hostdir" --guest "$T/guestdir" --version 1.0.0 --out "$T/relsplit" >"$T/o" 2>&1
 ok "release from separate host and guest folders gives the same files as from one folder (same inputs, same bytes)" 'cmp -s "$T/relsplit/openwrt-vm-arm64.tar.gz" "$R1/openwrt-vm-arm64.tar.gz" && cmp -s "$T/relsplit/MANIFEST" "$R1/MANIFEST" && cmp -s "$T/relsplit/SHA256SUMS" "$R1/SHA256SUMS"'
+( cd "$T" && bash "$HERE/owrt-release.sh" --build hostdir --guest guestdir --version 1.0.0 --out relrel >"$T/o" 2>&1 )
+ok "release with relative folder names (as the workflow calls it) gives the same bytes" 'cmp -s "$T/relrel/openwrt-vm-arm64.tar.gz" "$R1/openwrt-vm-arm64.tar.gz" && cmp -s "$T/relrel/SHA256SUMS" "$R1/SHA256SUMS"'
 echo x >> "$T/guestdir/Image"
 bash "$HERE/owrt-release.sh" --build "$T/hostdir" --guest "$T/guestdir" --version 1.0.0 --out "$T/relsplit2" >"$T/o" 2>&1
 ok "release refuses a guest folder that does not match its SHA256SUMS" 'grep -q "guestdir does not verify" "$T/o"'
