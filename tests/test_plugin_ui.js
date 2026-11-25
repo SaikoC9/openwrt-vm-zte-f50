@@ -38,6 +38,7 @@ execFileSync('bash', [path.join(root, 'scripts', 'owrt-release.sh'), '--build', 
 
 // the plugin with its device paths and release URL pointed at the temp folder
 const src = fs.readFileSync(path.join(root, 'plugin', 'OpenWrt_VM_v1_0.js'), 'utf8')
+  .replace(/^(\s*const PIN_SUMS_SHA256 = ')[0-9a-f]*(';)/m, '$1$2')
   .split('/data/local/matchi_owrt').join(DIR)
   .split('/data/local/matchitool/boot.d/30-openwrt-vm.sh').join(BOOT)
   .split('/data/data/com.matchi.tool/files/curl').join(CURL)

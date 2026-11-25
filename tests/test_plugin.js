@@ -10,7 +10,9 @@ const vm = require('vm');
 const { spawn, execFileSync } = require('child_process');
 
 const root = path.join(__dirname, '..');
-const pluginSrc = fs.readFileSync(path.join(root, 'plugin', 'OpenWrt_VM_v1_0.js'), 'utf8');
+// The tests build their own fake release, so the real release pin is cleared in memory (the file is not changed).
+const pluginSrc = fs.readFileSync(path.join(root, 'plugin', 'OpenWrt_VM_v1_0.js'), 'utf8')
+  .replace(/^(\s*const PIN_SUMS_SHA256 = ')[0-9a-f]*(';)/m, '$1$2');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'owrt-plugin-'));
 process.on('exit', () => fs.rmSync(tmp, { recursive: true, force: true }));
 let pass = 0; let fail = 0;
