@@ -1,20 +1,16 @@
 name: Release OpenWrt VM
 
-# Run workflow (Actions) with a version builds everything from that commit and publishes a
-# GitHub Release vMAJOR.MINOR.PATCH with: Image, rootfs.img.gz, cloud-hypervisor, owrt-vm.sh,
-# owrt-vm.conf.example, owrt-kvmprobe, owrt-fwd (when it exists), owrt-manifest.json, SHA256SUMS.
-# Pushing a tag vMAJOR.MINOR.PATCH does the same. The long part is the OpenWrt guest build
-# (about 1 hour). The release tag must not exist yet.
+# Run workflow (Actions) builds everything from that commit and publishes a GitHub Release
+# with: Image, rootfs.img.gz, cloud-hypervisor, owrt-vm.sh, owrt-vm.conf.example, owrt-kvmprobe,
+# owrt-fwd (when it exists), owrt-manifest.json, SHA256SUMS. Nothing to type: the version is
+# picked automatically. The first release is v1.0.0, every next one raises the patch number
+# of the highest vX.Y.Z tag (v1.0.1, v1.0.2, ...). Pushing a tag vMAJOR.MINOR.PATCH by hand
+# also works and uses that tag. The long part is the OpenWrt guest build (about 1 hour).
 on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release, MAJOR.MINOR.PATCH (no leading v); the tag becomes vX.Y.Z"
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -35,9 +31,19 @@ jobs:
         id: ver
         env:
           EVENT: ${{ github.event_name }}
-          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "$EVENT" = push ]; then v="${GITHUB_REF_NAME#v}"; else v="$INPUT_VERSION"; fi
+          if [ "$EVENT" = push ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            # highest vX.Y.Z tag; none (or only 0.x) -> first release 1.0.0, else patch + 1
+            last=$(git ls-remote --tags --refs origin 'refs/tags/v*' | sed 's#.*refs/tags/v##' \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+            if [ -z "$last" ] || [ "${last%%.*}" = 0 ]; then
+              v=1.0.0
+            else
+              v="${last%.*}.$(( ${last##*.} + 1 ))"
+            fi
+          fi
           if ! printf '%s' "$v" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
             echo "bad version '$v' (want MAJOR.MINOR.PATCH)"; exit 1
           fi
