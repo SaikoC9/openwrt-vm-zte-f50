@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the OpenWrt guest from source: Image + rootfs.img.
 # Usage: guest/build.sh OUTDIR
-# Needs the OpenWrt build dependencies and a non-root user.
+# Needs the OpenWrt build dependencies and a non-root user (see docs/OWRT_VM.md).
 # Env: OWRT_GUEST_WORK (default guest/work), JOBS (default nproc),
 #      OWRT_REQUIRE_PIN=1 (fail when guest/openwrt.pin has no commit).
 set -euo pipefail
