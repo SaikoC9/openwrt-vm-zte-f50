@@ -279,4 +279,44 @@ I start v1.1.0 "file://$R4" "$PIN2" >"$T/o" 2>&1; waitend
 ok "a good update still installs with the manager checks on" '[ "$(sv phase)" = done ] && [ "$(cat "$D/VERSION")" = 1.1.0 ] && [ "$(cat "$D/prev/VERSION")" = 1.0.0 ]'
 rm -rf "$D"
 
+# ---- import: a bundle that is already on the device (checked by what it is, no manifest)
+mkimp() { # dir kernelMagicOk(1/0) extra(1/0) -> dir/openwrt-vm-arm64.tar.gz
+  mkdir -p "$1/s"
+  { printf '\177ELF'; head -c 14 /dev/zero; printf '\267\000'; head -c 40000 /dev/urandom; } > "$1/s/cloud-hypervisor"
+  if [ "$2" = 1 ]; then { head -c 56 /dev/zero; printf 'ARMd'; head -c 100000 /dev/urandom; } > "$1/s/Image"
+  else head -c 100000 /dev/urandom > "$1/s/Image"; fi
+  { head -c 1080 /dev/zero; printf '\123\357'; head -c 300000 /dev/urandom; } > "$1/s/rootfs.img"
+  cp "$HERE/owrt-vm.sh" "$1/s/owrt-vm.sh"
+  [ "$3" = 1 ] && echo x > "$1/s/extra.txt"
+  ( cd "$1/s" && tar -czf ../openwrt-vm-arm64.tar.gz $(ls) )
+}
+rm -rf "$D"; mkdir -p "$D/import"
+mkimp "$T/imp1" 1 0
+B1="$T/imp1/openwrt-vm-arm64.tar.gz"; H1=$(sha256sum "$B1" | cut -d' ' -f1)
+I import relative/path.tar.gz >"$T/o" 2>&1; rc=$?
+ok "import: a relative path is refused" '[ $rc -eq 2 ] && grep -q "absolute path" "$T/o"'
+I import "$T/../etc/passwd" >"$T/o" 2>&1; rc=$?
+ok "import: a path with .. is refused" '[ $rc -eq 2 ]'
+I import "$B1" abc >"$T/o" 2>&1; rc=$?
+ok "import: a bad hash argument is refused" '[ $rc -eq 2 ]'
+I import "$B1" "$(printf '0%.0s' $(seq 1 64))" >"$T/o" 2>&1; waitend
+ok "import: a hash that does not match the file is refused, nothing installed" '[ "$(sv phase)" = error ] && sed -n "s/^msg=//p" "$D/install/state" | grep -q "does not match what was sent" && [ ! -e "$D/VERSION" ] && [ ! -e "$D/rootfs.img" ]'
+mkimp "$T/imp2" 0 0
+I import "$T/imp2/openwrt-vm-arm64.tar.gz" >"$T/o" 2>&1; waitend
+ok "import: a kernel that is not arm64 is refused, nothing installed" '[ "$(sv phase)" = error ] && sed -n "s/^msg=//p" "$D/install/state" | grep -q "not an arm64 kernel" && [ ! -e "$D/VERSION" ] && [ ! -e "$D/Image" ]'
+mkimp "$T/imp3" 1 1
+I import "$T/imp3/openwrt-vm-arm64.tar.gz" >"$T/o" 2>&1; waitend
+ok "import: an extra file in the bundle is refused" '[ "$(sv phase)" = error ] && sed -n "s/^msg=//p" "$D/install/state" | grep -q "unexpected entry" && [ ! -e "$D/VERSION" ]'
+cp "$B1" "$D/import/openwrt-vm-arm64.tar.gz"
+I import "$D/import/openwrt-vm-arm64.tar.gz" "$H1" >"$T/o" 2>&1; waitend
+ok "import: a good bundle installs as imported-<hash>, reported unpinned" '[ "$(sv phase)" = done ] && [ "$(sv unpinned)" = 1 ] && [ "$(cat "$D/VERSION")" = "imported-$(echo $H1 | cut -c1-8)" ] && [ -x "$D/owrt-vm.sh" ] && [ -x "$D/cloud-hypervisor" ] && [ -s "$D/Image" ] && [ -s "$D/rootfs.img" ]'
+ok "import: the uploaded copy in import/ is removed after a good install" '[ ! -e "$D/import/openwrt-vm-arm64.tar.gz" ]'
+ok "import: a file in import/ is not left half-installed (no tmp or prev)" '[ ! -e "$D/prev" ] && [ ! -e "$D/install/tmp" ]'
+mkimp "$T/imp4" 1 0
+I import "$T/imp4/openwrt-vm-arm64.tar.gz" >"$T/o" 2>&1; waitend
+ok "import: a second import moves the first release to prev/, a file outside import/ is kept" '[ "$(sv phase)" = done ] && [ -f "$T/imp4/openwrt-vm-arm64.tar.gz" ] && [ "$(cat "$D/prev/VERSION")" = "imported-$(echo $H1 | cut -c1-8)" ] && [ "$(cat "$D/VERSION")" != "$(cat "$D/prev/VERSION")" ]'
+I rollback >"$T/o" 2>&1
+ok "import: rollback returns to the first imported release" 'grep -q "rolled back to imported-$(echo $H1 | cut -c1-8)" "$T/o"'
+rm -rf "$D"
+
 echo "passed $pass, failed $fail"; [ "$fail" -eq 0 ]

@@ -1,9 +1,12 @@
 #!/bin/sh /etc/rc.common
 # Applies the LAN address from the kernel command line on every boot,
-# before netifd (START=20) reads /etc/config/network.
+# before netifd (START=20) reads /etc/config/network, and fills the model
+# shown by LuCI (a KVM guest has none).
 START=19
 
 start() {
 	. /lib/owrt-vm/lan.sh
+	. /lib/owrt-vm/model.sh
 	owrt_lan_apply
+	owrt_set_model
 }

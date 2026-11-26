@@ -172,6 +172,51 @@ const ctx = vm.createContext({ window: win, btoa: (s) => Buffer.from(s, 'binary'
   try { await A.installRelease(); } catch (e) { msg = e.message; }
   ok('installRelease: a missing release bundle throws with the file name', /download of openwrt-vm-arm64.tar.gz failed/.test(msg));
 
+  // ---- import of a local openwrt-vm-arm64.tar.gz
+  const nodeCrypto = require('crypto');
+  const shaOk = [0, 1, 55, 56, 63, 64, 65, 119, 120, 1000003].every((n) => {
+    const b = nodeCrypto.randomBytes(n);
+    return A.sha256Hex(new Uint8Array(b)) === nodeCrypto.createHash('sha256').update(b).digest('hex');
+  });
+  ok('sha256Hex matches node crypto for sizes around the block boundaries', shaOk);
+
+  const mkBundle = (dir, { kernelOk = true, extra = false } = {}) => {
+    fs.mkdirSync(path.join(dir, 's'), { recursive: true });
+    const w = (n, buf) => fs.writeFileSync(path.join(dir, 's', n), buf);
+    w('cloud-hypervisor', Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.alloc(14), Buffer.from([0xb7, 0x00]), nodeCrypto.randomBytes(40000)]));
+    w('Image', Buffer.concat([Buffer.alloc(56), Buffer.from(kernelOk ? 'ARMd' : 'XXXX'), nodeCrypto.randomBytes(200000)]));
+    w('rootfs.img', Buffer.concat([Buffer.alloc(1080), Buffer.from([0x53, 0xef]), nodeCrypto.randomBytes(1300000)]));
+    fs.copyFileSync(path.join(root, 'scripts', 'owrt-vm.sh'), path.join(dir, 's', 'owrt-vm.sh'));
+    if (extra) w('extra.txt', 'x');
+    execFileSync('sh', ['-c', 'cd "$1/s" && tar -czf ../b.tar.gz $(ls)', 'x', dir]);
+    const buf = fs.readFileSync(path.join(dir, 'b.tar.gz'));
+    return { name: 'openwrt-vm-arm64.tar.gz', size: buf.length, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length), buf };
+  };
+  const impDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owrt-imp-'));
+  fs.rmSync(path.join(DIR, 'install'), { recursive: true, force: true });
+  const fb = mkBundle(path.join(impDir, 'good'));
+  ok('the test bundle is big enough to need several upload pieces', fb.size > 3 * 48 * 1024);
+  const prog = [];
+  const idone = await A.importBundle(fb, (x) => prog.push(x.pct));
+  const impSha = nodeCrypto.createHash('sha256').update(fb.buf).digest('hex');
+  ok('importBundle: uploads, installs and ends with phase done, unpinned', idone.phase === 'done' && idone.unpinned === '1' && idone.tag === `imported-${impSha.slice(0, 8)}`);
+  ok('importBundle: progress goes up while sending', prog.length > 3 && prog.some((x) => x > 1 && x <= 80) && prog.every((x, i) => i === 0 || x >= prog[i - 1] - 15));
+  ok('importBundle: the version on the device is imported-<hash>', fs.readFileSync(path.join(DIR, 'VERSION'), 'utf8').trim() === `imported-${impSha.slice(0, 8)}`);
+  st = await A.getState(false);
+  ok('importBundle: getState sees it installed, release shown', st.installed === '1' && st.release === `imported-${impSha.slice(0, 8)}`);
+  ok('importBundle: the uploaded copy is gone and no .part is left', !fs.existsSync(path.join(DIR, 'import', 'openwrt-vm-arm64.tar.gz')) && !fs.existsSync(path.join(DIR, 'import', 'openwrt-vm-arm64.tar.gz.part')));
+  ok('importBundle: the installed disk is the bundle disk', fs.statSync(path.join(DIR, 'rootfs.img')).size === 1300000 + 1082);
+
+  let emsg = '';
+  const badB = mkBundle(path.join(impDir, 'bad'), { kernelOk: false });
+  try { await A.importBundle(badB); } catch (e) { emsg = e.message; }
+  ok('importBundle: a bundle with a wrong kernel fails with the installer message', /not an arm64 kernel/.test(emsg));
+  ok('importBundle: after a failure the uploaded copy is removed and the old install is untouched', !fs.existsSync(path.join(DIR, 'import', 'openwrt-vm-arm64.tar.gz')) && fs.readFileSync(path.join(DIR, 'VERSION'), 'utf8').trim() === `imported-${impSha.slice(0, 8)}`);
+  emsg = '';
+  try { await A.uploadBundle({ size: 10, arrayBuffer: async () => new ArrayBuffer(10) }); } catch (e) { emsg = e.message; }
+  ok('uploadBundle: a tiny file is refused before anything is sent', /1 MB to 300 MB/.test(emsg));
+  fs.rmSync(impDir, { recursive: true, force: true });
+
   console.log(`passed ${pass}, failed ${fail}`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

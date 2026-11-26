@@ -7,6 +7,7 @@
 #   sh owrt-install.sh cancel                             stop a running install
 #   sh owrt-install.sh peek BASE_URL                      print the release MANIFEST
 #   sh owrt-install.sh rollback                           swap with the previous release
+#   sh owrt-install.sh import FILE [SHA256]               install an openwrt-vm-arm64.tar.gz that is already on the device
 #
 # BASE_URL holds SHA256SUMS, MANIFEST and openwrt-vm-arm64.tar.gz (owrt-vm.sh,
 # cloud-hypervisor, Image and rootfs.img), what scripts/owrt-release.sh writes. SHA256SUMS_SHA256 is the
@@ -216,10 +217,22 @@ do_run() {
   fi
   PCT=85
 
-  # 4. unpack: the file list is checked first (only the four known names), then the disk against the manifest
+  # 4. unpack and stage (file list checked first), then the disk against the manifest
+  stage_bundle "$TMP/$BUNDLE"
+  [ "$(wc -c < "$TMP/rootfs.img")" = "$(mget rootfs_size)" ] || { drop_staged; fail "unpacked disk has the wrong size"; }
+  [ "$(bsum "$TMP/rootfs.img")" = "$(mget rootfs_sha256)" ] || { drop_staged; fail "unpacked disk does not match the manifest"; }
+  rm -f "$TMP/$BUNDLE"
+
+  # 4b + 5. check the new manager, then swap
+  swap_in "$ver"
+}
+
+# unpack BUNDLE_FILE into TMP (owrt-vm.sh cloud-hypervisor Image rootfs.img). Only the four known names are accepted.
+drop_staged() { for f in owrt-vm.sh cloud-hypervisor Image rootfs.img; do rm -f "$TMP/$f"; done; rm -rf "$TMP/x"; }
+stage_bundle() {
   PCT=88; setstate unpack "$PCT" "unpacking the release" "$BUNDLE"
   command -v tar >/dev/null 2>&1 || fail "no tar on this device: cannot unpack $BUNDLE"
-  unz "$TMP/$BUNDLE" 2>/dev/null | tar -tf - > "$WORK/bundle.list" 2>/dev/null
+  unz "$1" 2>/dev/null | tar -tf - > "$WORK/bundle.list" 2>/dev/null
   [ -s "$WORK/bundle.list" ] || fail "cannot read $BUNDLE (no gzip or tar on this device, or the file is damaged)"
   while read -r bl; do
     case ${bl#./} in owrt-vm.sh|cloud-hypervisor|Image|rootfs.img) ;; *) fail "unexpected entry in $BUNDLE: $bl" ;; esac
@@ -228,23 +241,22 @@ do_run() {
     grep -qx -e "$f" -e "./$f" "$WORK/bundle.list" || fail "$BUNDLE has no $f"
   done
   rm -rf "$TMP/x"; mkdir -p "$TMP/x" || fail "cannot create $TMP/x"
-  unz "$TMP/$BUNDLE" | tar -xf - -C "$TMP/x" || { rm -rf "$TMP/x"; fail "unpacking failed (disk full?)"; }
+  unz "$1" | tar -xf - -C "$TMP/x" || { rm -rf "$TMP/x"; fail "unpacking failed (disk full?)"; }
   for f in owrt-vm.sh cloud-hypervisor Image rootfs.img; do
     [ -f "$TMP/x/$f" ] && [ ! -L "$TMP/x/$f" ] && [ -s "$TMP/x/$f" ] || { rm -rf "$TMP/x"; fail "$f was not unpacked"; }
   done
-  [ "$(wc -c < "$TMP/x/rootfs.img")" = "$(mget rootfs_size)" ] || { rm -rf "$TMP/x"; fail "unpacked disk has the wrong size"; }
-  [ "$(bsum "$TMP/x/rootfs.img")" = "$(mget rootfs_sha256)" ] || { rm -rf "$TMP/x"; fail "unpacked disk does not match the manifest"; }
   for f in owrt-vm.sh cloud-hypervisor Image rootfs.img; do mv -f "$TMP/x/$f" "$TMP/$f" || fail "cannot stage $f"; done
   rm -rf "$TMP/x"
-  rm -f "$TMP/$BUNDLE"
+}
 
-  # 4b. the new manager must parse and run in this sh BEFORE anything in DIR is touched
+# swap_in VERSION: the staged manager must run here BEFORE anything in DIR is touched, then old release to prev/, new in
+swap_in() {
+  ver=$1
   PCT=93; setstate check "$PCT" "checking the new manager script"
   rm -rf "$TMP/probe"; mkdir -p "$TMP/probe" || fail "cannot create $TMP/probe"
   mgr_check "$TMP/owrt-vm.sh" "$TMP/probe" || { rm -rf "$TMP/probe"; for f in $FILES; do rm -f "$TMP/$f"; done; fail "$MGR_ERR"; }
   rm -rf "$TMP/probe"
 
-  # 5. swap: old release to prev/, new release in; undo on any failure
   vm_running && fail "the VM was started during the install: stop it and try again"
   PCT=95; setstate install "$PCT" "installing"
   printf '%s\n' "$ver" > "$TMP/VERSION"
@@ -260,13 +272,74 @@ do_run() {
   chmod 755 "$DIR/owrt-vm.sh" "$DIR/cloud-hypervisor"
   chmod 644 "$DIR/Image" "$DIR/VERSION"
   chmod 600 "$DIR/rootfs.img"
-  # 5b. the installed manager must work with the installed files; if not, the old release comes back
+  # the installed manager must work with the installed files; if not, the old release comes back
   mgr_check "$DIR/owrt-vm.sh" "$DIR" "$ver" || { undo_swap; fail "$MGR_ERR"; }
   rmdir "$PREV" 2>/dev/null
   rm -rf "$TMP"
   PCT=100; setstate done 100 "installed $ver"
   say "installed $ver"
   release_lock
+}
+
+# ---------------------------------------------------------------- import (a bundle that is already on the device)
+IMPORT_DIR=$DIR/import
+# hexword FILE OFFSET COUNT -> hex digits of COUNT bytes at OFFSET (od is in toybox and busybox)
+hexat() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | od -An -tx1 | tr -d ' \n'; }
+
+# the bundle is checked by what it is, not by a manifest: names, ELF arm64 VMM, arm64 kernel Image, ext2/3/4 disk
+check_staged_kinds() {
+  [ "$(hexat "$TMP/cloud-hypervisor" 0 4)" = 7f454c46 ] && [ "$(hexat "$TMP/cloud-hypervisor" 18 2)" = b700 ] ||
+    { drop_staged; fail "cloud-hypervisor in the bundle is not an arm64 program"; }
+  [ "$(hexat "$TMP/Image" 56 4)" = 41524d64 ] || { drop_staged; fail "Image in the bundle is not an arm64 kernel"; }
+  [ "$(hexat "$TMP/rootfs.img" 1080 2)" = 53ef ] || { drop_staged; fail "rootfs.img in the bundle is not an ext2/3/4 disk"; }
+  head -n 1 "$TMP/owrt-vm.sh" | grep -q '^#!' || { drop_staged; fail "owrt-vm.sh in the bundle is not a script"; }
+}
+
+valid_import_args() {
+  case $1 in /*) ;; *) return 1 ;; esac
+  case $1 in *[!A-Za-z0-9./_-]*|*..*) return 1 ;; esac
+  [ -z "${2:-}" ] && return 0
+  case $2 in *[!0-9a-f]*) return 1 ;; esac
+  [ "${#2}" -eq 64 ]
+}
+
+# do_import_run FILE [SHA256]: foreground. Without SHA256 the file is trusted as given; the version is imported-<first 8 of its hash>.
+do_import_run() {
+  F=$1; WANT=${2:-}
+  TAG=; PCT=0; UNPINNED=1
+  valid_import_args "$F" "$WANT" || fail "bad arguments"
+  mkdir -p "$WORK" || fail "cannot create $WORK"
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    lp=$(cat "$PIDF" 2>/dev/null)
+    if [ -n "$lp" ] && kill -0 "$lp" 2>/dev/null; then
+      say "ERROR: another install is running (pid $lp)" >&2; exit 1
+    fi
+    rm -rf "$LOCK"; mkdir "$LOCK" || fail "cannot take the install lock"
+  fi
+  HAVE_LOCK=1
+  echo $$ > "$PIDF"
+  trap 'fail "interrupted"' INT TERM HUP
+  setstate start 0 "starting import"
+
+  [ -f "$F" ] && [ ! -L "$F" ] && [ -s "$F" ] || fail "no such file: $F"
+  vm_running && fail "the VM is running: stop it first"
+  fk=$(free_kb)
+  case $fk in ''|*[!0-9]*) fk=0 ;; esac
+  [ "$fk" -ge "$MIN_FREE_KB" ] || [ "$fk" -eq 0 ] ||
+    fail "not enough free space in $DIR: $((fk / 1024)) MB free, $((MIN_FREE_KB / 1024)) MB needed"
+  mkdir -p "$TMP" || fail "cannot create $TMP"
+
+  PCT=10; setstate sums "$PCT" "checking the file" "$BUNDLE"
+  got=$(bsum "$F")
+  [ -n "$got" ] || fail "no SHA-256 tool on this device"
+  [ -z "$WANT" ] || [ "$got" = "$WANT" ] || fail "the file on the device does not match what was sent (upload damaged, try again)"
+  ver=imported-$(printf '%s' "$got" | cut -c1-8)
+  TAG=$ver
+
+  stage_bundle "$F"
+  check_staged_kinds
+  swap_in "$ver"
+  case $F in "$IMPORT_DIR"/*) rm -f "$F" ;; esac
 }
 
 # move back what was moved aside (files that were never moved stay where they are)
@@ -285,20 +358,19 @@ undo_swap() {
 }
 
 # ---------------------------------------------------------------- other commands
-do_start() {
-  valid_args "$1" "$2" "${3:-}" || { say "ERROR: bad arguments (TAG BASE_URL [SUMS_SHA256])" >&2; exit 2; }
+# launch MODE ARGS...: run "MODE ARGS" detached and wait until it has taken its lock (or finished)
+launch() {
   mkdir -p "$WORK" || { say "ERROR: cannot create $WORK" >&2; exit 1; }
   if [ -f "$PIDF" ]; then
     lp=$(cat "$PIDF" 2>/dev/null)
     [ -n "$lp" ] && kill -0 "$lp" 2>/dev/null && { say "ERROR: an install is already running (pid $lp)" >&2; exit 1; }
   fi
   rm -f "$STATE" "$PIDF"
-  TAG=$1
   setstate start 0 "starting"
   if command -v setsid >/dev/null 2>&1; then
-    OWRT_DIR=$DIR setsid sh "$SELF" run "$@" >"$LOG" 2>&1 </dev/null &
+    OWRT_DIR=$DIR setsid sh "$SELF" "$@" >"$LOG" 2>&1 </dev/null &
   else
-    ( trap '' HUP; OWRT_DIR=$DIR sh "$SELF" run "$@" ) >"$LOG" 2>&1 </dev/null &
+    ( trap '' HUP; OWRT_DIR=$DIR sh "$SELF" "$@" ) >"$LOG" 2>&1 </dev/null &
   fi
   i=0
   while [ "$i" -lt 5 ] && [ ! -s "$PIDF" ]; do
@@ -312,6 +384,17 @@ do_start() {
     *) if [ -s "$PIDF" ]; then say "started"
        else say "ERROR: the installer did not start (see $LOG)" >&2; exit 1; fi ;;
   esac
+}
+
+do_start() {
+  valid_args "$1" "$2" "${3:-}" || { say "ERROR: bad arguments (TAG BASE_URL [SUMS_SHA256])" >&2; exit 2; }
+  TAG=$1
+  launch run "$@"
+}
+
+do_import() {
+  valid_import_args "$1" "${2:-}" || { say "ERROR: bad arguments (FILE [SHA256]; FILE must be an absolute path)" >&2; exit 2; }
+  launch import-run "$@"
 }
 
 do_status() {
@@ -364,9 +447,11 @@ do_rollback() {
 case $1 in
   start) shift; do_start "$@" ;;
   run) shift; do_run "$@" ;;
+  import) shift; do_import "$@" ;;
+  import-run) shift; do_import_run "$@" ;;
   status) do_status ;;
   cancel) do_cancel ;;
   peek) do_peek "$2" ;;
   rollback) do_rollback ;;
-  *) echo "usage: sh owrt-install.sh start TAG BASE_URL [SUMS_SHA256] | status | cancel | peek BASE_URL | rollback"; exit 2 ;;
+  *) echo "usage: sh owrt-install.sh start TAG BASE_URL [SUMS_SHA256] | import FILE [SHA256] | status | cancel | peek BASE_URL | rollback"; exit 2 ;;
 esac

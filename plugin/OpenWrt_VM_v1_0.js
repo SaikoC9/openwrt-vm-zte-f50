@@ -1,7 +1,7 @@
 // @matchi-name OpenWrt VM (F50)
 // @matchi-version 1.0
 // @matchi-author saiko
-// @matchi-description OpenWrt in a KVM virtual machine on the F50: install from a release, start/stop, hotspot mode, settings, backups, rollback, boot start.
+// @matchi-description OpenWrt in a KVM virtual machine on the F50: install from a release or import your own openwrt-vm-arm64.tar.gz, start/stop, hotspot mode, settings, backups, rollback, boot start.
 // @matchi-requires root, curl
 /*
  * OpenWrt VM (F50) for MatchiTOOL (plugin version 1.0)
@@ -23,7 +23,7 @@
   const STYLE_ID = 'matchi_owrt_style';
   const BTN_ID = 'matchi_owrt_btn';
   const REPO = 'SaikoC9/openwrt-vm-zte-f50';
-  const RELEASE_TAG = 'v1.0.6';
+  const RELEASE_TAG = 'v1.0.7';
   // Hash of the SHA256SUMS file of RELEASE_TAG (scripts/owrt-release.sh prints it). Empty = unpinned: the download is then only
   // checked against the SHA256SUMS of the same server, and the Maintenance tab says so.
   const PIN_SUMS_SHA256 = '';
@@ -49,6 +49,7 @@
 #   sh owrt-install.sh cancel                             stop a running install
 #   sh owrt-install.sh peek BASE_URL                      print the release MANIFEST
 #   sh owrt-install.sh rollback                           swap with the previous release
+#   sh owrt-install.sh import FILE [SHA256]               install an openwrt-vm-arm64.tar.gz that is already on the device
 #
 # BASE_URL holds SHA256SUMS, MANIFEST and openwrt-vm-arm64.tar.gz (owrt-vm.sh,
 # cloud-hypervisor, Image and rootfs.img), what scripts/owrt-release.sh writes. SHA256SUMS_SHA256 is the
@@ -258,10 +259,22 @@ do_run() {
   fi
   PCT=85
 
-  # 4. unpack: the file list is checked first (only the four known names), then the disk against the manifest
+  # 4. unpack and stage (file list checked first), then the disk against the manifest
+  stage_bundle "$TMP/$BUNDLE"
+  [ "$(wc -c < "$TMP/rootfs.img")" = "$(mget rootfs_size)" ] || { drop_staged; fail "unpacked disk has the wrong size"; }
+  [ "$(bsum "$TMP/rootfs.img")" = "$(mget rootfs_sha256)" ] || { drop_staged; fail "unpacked disk does not match the manifest"; }
+  rm -f "$TMP/$BUNDLE"
+
+  # 4b + 5. check the new manager, then swap
+  swap_in "$ver"
+}
+
+# unpack BUNDLE_FILE into TMP (owrt-vm.sh cloud-hypervisor Image rootfs.img). Only the four known names are accepted.
+drop_staged() { for f in owrt-vm.sh cloud-hypervisor Image rootfs.img; do rm -f "$TMP/$f"; done; rm -rf "$TMP/x"; }
+stage_bundle() {
   PCT=88; setstate unpack "$PCT" "unpacking the release" "$BUNDLE"
   command -v tar >/dev/null 2>&1 || fail "no tar on this device: cannot unpack $BUNDLE"
-  unz "$TMP/$BUNDLE" 2>/dev/null | tar -tf - > "$WORK/bundle.list" 2>/dev/null
+  unz "$1" 2>/dev/null | tar -tf - > "$WORK/bundle.list" 2>/dev/null
   [ -s "$WORK/bundle.list" ] || fail "cannot read $BUNDLE (no gzip or tar on this device, or the file is damaged)"
   while read -r bl; do
     case \${bl#./} in owrt-vm.sh|cloud-hypervisor|Image|rootfs.img) ;; *) fail "unexpected entry in $BUNDLE: $bl" ;; esac
@@ -270,23 +283,22 @@ do_run() {
     grep -qx -e "$f" -e "./$f" "$WORK/bundle.list" || fail "$BUNDLE has no $f"
   done
   rm -rf "$TMP/x"; mkdir -p "$TMP/x" || fail "cannot create $TMP/x"
-  unz "$TMP/$BUNDLE" | tar -xf - -C "$TMP/x" || { rm -rf "$TMP/x"; fail "unpacking failed (disk full?)"; }
+  unz "$1" | tar -xf - -C "$TMP/x" || { rm -rf "$TMP/x"; fail "unpacking failed (disk full?)"; }
   for f in owrt-vm.sh cloud-hypervisor Image rootfs.img; do
     [ -f "$TMP/x/$f" ] && [ ! -L "$TMP/x/$f" ] && [ -s "$TMP/x/$f" ] || { rm -rf "$TMP/x"; fail "$f was not unpacked"; }
   done
-  [ "$(wc -c < "$TMP/x/rootfs.img")" = "$(mget rootfs_size)" ] || { rm -rf "$TMP/x"; fail "unpacked disk has the wrong size"; }
-  [ "$(bsum "$TMP/x/rootfs.img")" = "$(mget rootfs_sha256)" ] || { rm -rf "$TMP/x"; fail "unpacked disk does not match the manifest"; }
   for f in owrt-vm.sh cloud-hypervisor Image rootfs.img; do mv -f "$TMP/x/$f" "$TMP/$f" || fail "cannot stage $f"; done
   rm -rf "$TMP/x"
-  rm -f "$TMP/$BUNDLE"
+}
 
-  # 4b. the new manager must parse and run in this sh BEFORE anything in DIR is touched
+# swap_in VERSION: the staged manager must run here BEFORE anything in DIR is touched, then old release to prev/, new in
+swap_in() {
+  ver=$1
   PCT=93; setstate check "$PCT" "checking the new manager script"
   rm -rf "$TMP/probe"; mkdir -p "$TMP/probe" || fail "cannot create $TMP/probe"
   mgr_check "$TMP/owrt-vm.sh" "$TMP/probe" || { rm -rf "$TMP/probe"; for f in $FILES; do rm -f "$TMP/$f"; done; fail "$MGR_ERR"; }
   rm -rf "$TMP/probe"
 
-  # 5. swap: old release to prev/, new release in; undo on any failure
   vm_running && fail "the VM was started during the install: stop it and try again"
   PCT=95; setstate install "$PCT" "installing"
   printf '%s\\n' "$ver" > "$TMP/VERSION"
@@ -302,13 +314,74 @@ do_run() {
   chmod 755 "$DIR/owrt-vm.sh" "$DIR/cloud-hypervisor"
   chmod 644 "$DIR/Image" "$DIR/VERSION"
   chmod 600 "$DIR/rootfs.img"
-  # 5b. the installed manager must work with the installed files; if not, the old release comes back
+  # the installed manager must work with the installed files; if not, the old release comes back
   mgr_check "$DIR/owrt-vm.sh" "$DIR" "$ver" || { undo_swap; fail "$MGR_ERR"; }
   rmdir "$PREV" 2>/dev/null
   rm -rf "$TMP"
   PCT=100; setstate done 100 "installed $ver"
   say "installed $ver"
   release_lock
+}
+
+# ---------------------------------------------------------------- import (a bundle that is already on the device)
+IMPORT_DIR=$DIR/import
+# hexword FILE OFFSET COUNT -> hex digits of COUNT bytes at OFFSET (od is in toybox and busybox)
+hexat() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | od -An -tx1 | tr -d ' \\n'; }
+
+# the bundle is checked by what it is, not by a manifest: names, ELF arm64 VMM, arm64 kernel Image, ext2/3/4 disk
+check_staged_kinds() {
+  [ "$(hexat "$TMP/cloud-hypervisor" 0 4)" = 7f454c46 ] && [ "$(hexat "$TMP/cloud-hypervisor" 18 2)" = b700 ] ||
+    { drop_staged; fail "cloud-hypervisor in the bundle is not an arm64 program"; }
+  [ "$(hexat "$TMP/Image" 56 4)" = 41524d64 ] || { drop_staged; fail "Image in the bundle is not an arm64 kernel"; }
+  [ "$(hexat "$TMP/rootfs.img" 1080 2)" = 53ef ] || { drop_staged; fail "rootfs.img in the bundle is not an ext2/3/4 disk"; }
+  head -n 1 "$TMP/owrt-vm.sh" | grep -q '^#!' || { drop_staged; fail "owrt-vm.sh in the bundle is not a script"; }
+}
+
+valid_import_args() {
+  case $1 in /*) ;; *) return 1 ;; esac
+  case $1 in *[!A-Za-z0-9./_-]*|*..*) return 1 ;; esac
+  [ -z "\${2:-}" ] && return 0
+  case $2 in *[!0-9a-f]*) return 1 ;; esac
+  [ "\${#2}" -eq 64 ]
+}
+
+# do_import_run FILE [SHA256]: foreground. Without SHA256 the file is trusted as given; the version is imported-<first 8 of its hash>.
+do_import_run() {
+  F=$1; WANT=\${2:-}
+  TAG=; PCT=0; UNPINNED=1
+  valid_import_args "$F" "$WANT" || fail "bad arguments"
+  mkdir -p "$WORK" || fail "cannot create $WORK"
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    lp=$(cat "$PIDF" 2>/dev/null)
+    if [ -n "$lp" ] && kill -0 "$lp" 2>/dev/null; then
+      say "ERROR: another install is running (pid $lp)" >&2; exit 1
+    fi
+    rm -rf "$LOCK"; mkdir "$LOCK" || fail "cannot take the install lock"
+  fi
+  HAVE_LOCK=1
+  echo $$ > "$PIDF"
+  trap 'fail "interrupted"' INT TERM HUP
+  setstate start 0 "starting import"
+
+  [ -f "$F" ] && [ ! -L "$F" ] && [ -s "$F" ] || fail "no such file: $F"
+  vm_running && fail "the VM is running: stop it first"
+  fk=$(free_kb)
+  case $fk in ''|*[!0-9]*) fk=0 ;; esac
+  [ "$fk" -ge "$MIN_FREE_KB" ] || [ "$fk" -eq 0 ] ||
+    fail "not enough free space in $DIR: $((fk / 1024)) MB free, $((MIN_FREE_KB / 1024)) MB needed"
+  mkdir -p "$TMP" || fail "cannot create $TMP"
+
+  PCT=10; setstate sums "$PCT" "checking the file" "$BUNDLE"
+  got=$(bsum "$F")
+  [ -n "$got" ] || fail "no SHA-256 tool on this device"
+  [ -z "$WANT" ] || [ "$got" = "$WANT" ] || fail "the file on the device does not match what was sent (upload damaged, try again)"
+  ver=imported-$(printf '%s' "$got" | cut -c1-8)
+  TAG=$ver
+
+  stage_bundle "$F"
+  check_staged_kinds
+  swap_in "$ver"
+  case $F in "$IMPORT_DIR"/*) rm -f "$F" ;; esac
 }
 
 # move back what was moved aside (files that were never moved stay where they are)
@@ -327,20 +400,19 @@ undo_swap() {
 }
 
 # ---------------------------------------------------------------- other commands
-do_start() {
-  valid_args "$1" "$2" "\${3:-}" || { say "ERROR: bad arguments (TAG BASE_URL [SUMS_SHA256])" >&2; exit 2; }
+# launch MODE ARGS...: run "MODE ARGS" detached and wait until it has taken its lock (or finished)
+launch() {
   mkdir -p "$WORK" || { say "ERROR: cannot create $WORK" >&2; exit 1; }
   if [ -f "$PIDF" ]; then
     lp=$(cat "$PIDF" 2>/dev/null)
     [ -n "$lp" ] && kill -0 "$lp" 2>/dev/null && { say "ERROR: an install is already running (pid $lp)" >&2; exit 1; }
   fi
   rm -f "$STATE" "$PIDF"
-  TAG=$1
   setstate start 0 "starting"
   if command -v setsid >/dev/null 2>&1; then
-    OWRT_DIR=$DIR setsid sh "$SELF" run "$@" >"$LOG" 2>&1 </dev/null &
+    OWRT_DIR=$DIR setsid sh "$SELF" "$@" >"$LOG" 2>&1 </dev/null &
   else
-    ( trap '' HUP; OWRT_DIR=$DIR sh "$SELF" run "$@" ) >"$LOG" 2>&1 </dev/null &
+    ( trap '' HUP; OWRT_DIR=$DIR sh "$SELF" "$@" ) >"$LOG" 2>&1 </dev/null &
   fi
   i=0
   while [ "$i" -lt 5 ] && [ ! -s "$PIDF" ]; do
@@ -354,6 +426,17 @@ do_start() {
     *) if [ -s "$PIDF" ]; then say "started"
        else say "ERROR: the installer did not start (see $LOG)" >&2; exit 1; fi ;;
   esac
+}
+
+do_start() {
+  valid_args "$1" "$2" "\${3:-}" || { say "ERROR: bad arguments (TAG BASE_URL [SUMS_SHA256])" >&2; exit 2; }
+  TAG=$1
+  launch run "$@"
+}
+
+do_import() {
+  valid_import_args "$1" "\${2:-}" || { say "ERROR: bad arguments (FILE [SHA256]; FILE must be an absolute path)" >&2; exit 2; }
+  launch import-run "$@"
 }
 
 do_status() {
@@ -406,11 +489,13 @@ do_rollback() {
 case $1 in
   start) shift; do_start "$@" ;;
   run) shift; do_run "$@" ;;
+  import) shift; do_import "$@" ;;
+  import-run) shift; do_import_run "$@" ;;
   status) do_status ;;
   cancel) do_cancel ;;
   peek) do_peek "$2" ;;
   rollback) do_rollback ;;
-  *) echo "usage: sh owrt-install.sh start TAG BASE_URL [SUMS_SHA256] | status | cancel | peek BASE_URL | rollback"; exit 2 ;;
+  *) echo "usage: sh owrt-install.sh start TAG BASE_URL [SUMS_SHA256] | import FILE [SHA256] | status | cancel | peek BASE_URL | rollback"; exit 2 ;;
 esac
 `;
   // @@INSTALL_SH_END
@@ -616,6 +701,9 @@ esac
     }
     const start = await runRoot(inst(`start ${tag} ${base}${pin ? ` ${pin}` : ''}`), 30000);
     if (!start.ok) throw new Error(start.text.replace(/^owrt-install: (ERROR: )?/, '') || 'The installer did not start');
+    return pollInstall(onProgress);
+  };
+  const pollInstall = async (onProgress) => {
     const t0 = Date.now();
     while (Date.now() - t0 < 30 * 60 * 1000) {
       await sleep(TEST ? 300 : 2000);
@@ -625,6 +713,100 @@ esac
       if (st.phase === 'error') throw new Error(st.msg || 'Install failed');
     }
     throw new Error('The install took longer than 30 minutes; check Maintenance > Install again');
+  };
+
+  // ------------------------------------------------------------------ import of a local openwrt-vm-arm64.tar.gz
+  // The page is plain http on the hotspot, so crypto.subtle does not exist there: SHA-256 is computed here.
+  const sha256Hex = (u8) => {
+    const K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+    const h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    const w = new Int32Array(64);
+    const rr = (x, n) => (x >>> n) | (x << (32 - n));
+    const block = (b, o) => {
+      for (let i = 0; i < 16; i += 1) { const j = o + i * 4; w[i] = (b[j] << 24) | (b[j + 1] << 16) | (b[j + 2] << 8) | b[j + 3]; }
+      for (let i = 16; i < 64; i += 1) {
+        const s0 = rr(w[i - 15], 7) ^ rr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        const s1 = rr(w[i - 2], 17) ^ rr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+      }
+      let a = h[0]; let b1 = h[1]; let c = h[2]; let d = h[3]; let e = h[4]; let f = h[5]; let g = h[6]; let hh = h[7];
+      for (let i = 0; i < 64; i += 1) {
+        const t1 = (hh + (rr(e, 6) ^ rr(e, 11) ^ rr(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0;
+        const t2 = ((rr(a, 2) ^ rr(a, 13) ^ rr(a, 22)) + ((a & b1) ^ (a & c) ^ (b1 & c))) | 0;
+        hh = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b1; b1 = a; a = (t1 + t2) | 0;
+      }
+      h[0] = (h[0] + a) | 0; h[1] = (h[1] + b1) | 0; h[2] = (h[2] + c) | 0; h[3] = (h[3] + d) | 0;
+      h[4] = (h[4] + e) | 0; h[5] = (h[5] + f) | 0; h[6] = (h[6] + g) | 0; h[7] = (h[7] + hh) | 0;
+    };
+    const len = u8.length;
+    const full = len - (len % 64);
+    for (let o = 0; o < full; o += 64) block(u8, o);
+    const rem = len - full;
+    const tail = new Uint8Array(rem + 9 <= 64 ? 64 : 128);
+    tail.set(u8.subarray(full), 0);
+    tail[rem] = 0x80;
+    const bits = len * 8;
+    const dv = new DataView(tail.buffer);
+    dv.setUint32(tail.length - 8, Math.floor(bits / 4294967296));
+    dv.setUint32(tail.length - 4, bits >>> 0);
+    for (let o = 0; o < tail.length; o += 64) block(tail, o);
+    return h.map((x) => (x >>> 0).toString(16).padStart(8, '0')).join('');
+  };
+  const b64bytes = (u8) => {
+    let bin = '';
+    for (let i = 0; i < u8.length; i += 8192) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+    return btoa(bin);
+  };
+  const IMPORT_DIR = `${DIR}/import`;
+  const IMPORT_FILE = `${IMPORT_DIR}/openwrt-vm-arm64.tar.gz`;
+  const IMPORT_CHUNK = 48 * 1024;   // 64 KB of base64 per root command: below the 128 KB limit of one command argument
+  const IMPORT_MIN = 1024 * 1024;
+  const IMPORT_MAX = 300 * 1024 * 1024;
+
+  // Sends the file in checked pieces (each piece only lands when the file on the device has exactly the expected size),
+  // then returns the SHA-256 the installer must find on the device.
+  const uploadBundle = async (file, onProgress) => {
+    if (!file || !(file.size >= IMPORT_MIN) || file.size > IMPORT_MAX) throw new Error('That does not look like an openwrt-vm-arm64.tar.gz (size must be 1 MB to 300 MB)');
+    const buf = new Uint8Array(await file.arrayBuffer());
+    onProgress?.({ pct: 1, msg: 'checking the file' });
+    const sha = sha256Hex(buf);
+    const part = `${IMPORT_FILE}.part`;
+    const r0 = await runRoot(`mkdir -p ${IMPORT_DIR} && chmod 700 ${IMPORT_DIR} && rm -f ${IMPORT_FILE} && (umask 077; : > ${part}) && echo READY`);
+    if (!r0.ok || !r0.text.includes('READY')) throw new Error(`Could not prepare ${IMPORT_DIR}: ${r0.text.slice(0, 120)}`);
+    const sizeOf = async () => Number((await runRoot(`wc -c < ${part}`)).text) || 0;
+    for (let off = 0; off < buf.length; off += IMPORT_CHUNK) {
+      const piece = buf.subarray(off, off + IMPORT_CHUNK);
+      const cmd = `[ "$(wc -c < ${part})" = ${off} ] && echo ${b64bytes(piece)} | base64 -d >> ${part} && echo CHUNK_OK || echo CHUNK_BAD`;
+      let r = await runRoot(cmd, 30000);
+      if (!r.text.includes('CHUNK_OK')) {
+        const now = await sizeOf();
+        if (now === off + piece.length) r = { text: 'CHUNK_OK' };          // it landed, only the answer was lost
+        else if (now === off) r = await runRoot(cmd, 30000);               // nothing landed: once more
+      }
+      if (!r.text.includes('CHUNK_OK')) throw new Error(`Upload stopped at ${Math.round(off / 1024)} KB of ${Math.round(buf.length / 1024)} KB`);
+      onProgress?.({ pct: Math.max(1, Math.min(80, Math.round(((off + piece.length) / buf.length) * 80))), msg: 'sending to the device' });
+    }
+    const fin = await runRoot(`[ "$(wc -c < ${part})" = ${buf.length} ] && mv -f ${part} ${IMPORT_FILE} && echo MOVED`);
+    if (!fin.text.includes('MOVED')) throw new Error('The file on the device has the wrong size after the upload');
+    return sha;
+  };
+
+  const importBundle = async (file, onProgress) => {
+    await writeFile(INSTALLER, INSTALL_SH, 755);
+    let ok = false;
+    try {
+      const sha = await uploadBundle(file, onProgress);
+      const start = await runRoot(inst(`import ${IMPORT_FILE} ${sha}`), 30000);
+      if (!start.ok) throw new Error(start.text.replace(/^owrt-install: (ERROR: )?/, '') || 'The installer did not start');
+      const st = await pollInstall(onProgress);
+      ok = true;
+      return st;
+    } finally {
+      if (!ok) await runRoot(`rm -f ${IMPORT_FILE} ${IMPORT_FILE}.part`);
+    }
   };
 
   const checkUpdate = async () => {
@@ -637,7 +819,7 @@ esac
 
   // ------------------------------------------------------------------ test hook
   if (TEST) {
-    TEST.api = { validateSettings, mergeConf, confToSettings, parseKv, parseBackups, luciUrl, bootFileText, INSTALL_SH, writeFileCmd, runRoot, getState, saveSettings, setBoot, bootOn, startVm, stopVm, installRelease, readConf, fmtMb, esc, constants: { BASE_PINNED, BASE_LATEST, RELEASE_TAG, DIR, MANAGED } };
+    TEST.api = { validateSettings, mergeConf, confToSettings, parseKv, parseBackups, luciUrl, bootFileText, INSTALL_SH, writeFileCmd, runRoot, getState, saveSettings, setBoot, bootOn, startVm, stopVm, installRelease, importBundle, uploadBundle, sha256Hex, readConf, fmtMb, esc, constants: { BASE_PINNED, BASE_LATEST, RELEASE_TAG, DIR, MANAGED } };
     return;
   }
 
@@ -907,7 +1089,7 @@ esac
           <details class="ow-card" open>
             <summary>Maintenance</summary>
             <span class="ow-lbl">Release</span>
-            <div class="ow-bs"><button type="button" class="ow-act" id="ow_install">Install</button><button type="button" class="ow-act" id="ow_checkup">Check</button><button type="button" class="ow-act" id="ow_relpage">Releases</button><button type="button" class="ow-act" id="ow_rollback">Roll back</button></div>
+            <div class="ow-bs"><button type="button" class="ow-act" id="ow_install">Install</button><button type="button" class="ow-act" id="ow_import">Import</button><input type="file" id="ow_impfile" accept=".gz,.tgz,application/gzip,application/x-gzip" style="display:none"><button type="button" class="ow-act" id="ow_checkup">Check</button><button type="button" class="ow-act" id="ow_relpage">Releases</button><button type="button" class="ow-act" id="ow_rollback">Roll back</button></div>
             <div class="ow-bar"><i id="ow_prog"></i></div>
             <div class="ow-note" id="ow_prog_txt"></div>
             <div class="ow-note" id="ow_pinnote"></div>
@@ -996,6 +1178,21 @@ esac
       showProg(st);
       toast(`Installed ${st.tag || 'v' + u.latest}`, 'green', 6000);
     }, 'Installing…');
+    q('#ow_import').onclick = () => { if (busy === 0) q('#ow_impfile').click(); };
+    q('#ow_impfile').onchange = guarded(async () => {
+      const inp = q('#ow_impfile');
+      const file = inp.files && inp.files[0];
+      inp.value = '';
+      if (!file) return;
+      if (!confirmBox(`Import ${file.name} (${fmtMb(Math.round(file.size / 1024))})? It is not checked against a release, so use only a bundle you trust. It replaces the OpenWrt disk; the previous release is kept for one roll back.`)) return;
+      if (lastState?.running === '1') {
+        if (!confirmBox('VM will be stopped first. Continue?')) return;
+        await stopVm();
+      }
+      const st = await importBundle(file, showProg);
+      showProg(st);
+      toast(`Imported ${st.tag || 'bundle'}`, 'green', 6000);
+    }, '');
     q('#ow_relpage').onclick = () => window.open(`https://github.com/${REPO}/releases`, '_blank', 'noopener');
     q('#ow_checkup').onclick = guarded(async () => {
       const u = await checkUpdate();

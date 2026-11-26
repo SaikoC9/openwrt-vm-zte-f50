@@ -135,6 +135,19 @@ check "sysctl: arp_notify on all and default" "grep -qx 'net.ipv4.conf.all.arp_n
 : > "$FAKE_UCI"; PATH="$T/fb:$PATH" OWRT_NETCONF="$T/network2" sh "$G/files/etc/uci-defaults/99-owrt-vm"
 check "defaults: works without a ula prefix" "! grep -q ula_prefix $T/network2 && grep -q \"config globals 'globals'\" $T/network2"
 
+# model: LuCI shows "Model: ?" when /tmp/sysinfo/model is missing or empty
+MODEL="$G/files/lib/owrt-vm/model.sh"
+run_model() { OWRT_SYSINFO="$T/sysinfo" sh -c ". $MODEL; owrt_set_model" 2>/dev/null; }
+rm -rf "$T/sysinfo"; run_model
+check "model: written when missing" "[ -s $T/sysinfo/model ] && grep -q 'ZTE F50' $T/sysinfo/model"
+: > "$T/sysinfo/model"; run_model
+check "model: an empty file is filled" "[ -s $T/sysinfo/model ]"
+echo "Kernel Provided Board" > "$T/sysinfo/model"; run_model
+check "model: a model from the kernel is kept" "grep -qx 'Kernel Provided Board' $T/sysinfo/model"
+rm -rf "$T/sysinfo"; OWRT_MODEL="Custom VM" OWRT_SYSINFO="$T/sysinfo" sh -c ". $MODEL; owrt_set_model"
+check "model: OWRT_MODEL overrides the name" "grep -qx 'Custom VM' $T/sysinfo/model"
+check "init script loads and calls owrt_set_model" "grep -q 'model.sh' $G/files/etc/init.d/owrt-vm && grep -q '^	owrt_set_model' $G/files/etc/init.d/owrt-vm && sh -n $G/files/etc/init.d/owrt-vm"
+
 # pin file and build.sh basics
 check "openwrt.pin names a v25.12 tag" "grep -q '^OPENWRT_TAG=v25\.12\.' $G/openwrt.pin"
 check "build.sh parses" "bash -n $G/build.sh"
