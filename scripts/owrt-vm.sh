@@ -853,6 +853,16 @@ cmd_loop() {
 case $1 in
   check) cmd_check ;;
   start) cmd_start "$2" ;;
+  start-run) ( cmd_start ); rc=$?; say "start finished rc=$rc"; exit "$rc" ;;
+  start-bg)
+    SLOG=$DIR/start.log
+    : > "$SLOG" 2>/dev/null || die "cannot write $SLOG"
+    if command -v setsid >/dev/null 2>&1; then
+      OWRT_DIR=$DIR setsid sh "$SELF" start-run >"$SLOG" 2>&1 </dev/null &
+    else
+      ( trap '' HUP; OWRT_DIR=$DIR sh "$SELF" start-run ) >"$SLOG" 2>&1 </dev/null &
+    fi
+    say "start requested" ;;
   stop) cmd_stop ;;
   restart) cmd_stop; cmd_start "$2" ;;
   status) cmd_status ;;
@@ -869,5 +879,5 @@ case $1 in
     if [ "$GUEST_DHCP4" = 1 ] && lan_joined; then
       say "WARNING: GUEST_DHCP4=1 and the LAN is joined: Android's DHCP now runs next to OpenWrt's (two servers). Use unjoin to leave, or dhcp-block 0 to block again."
     fi ;;
-  *) echo "usage: sh owrt-vm.sh check|start [fg]|stop|restart|status|logs|state|gone|test|loop N|cpu [SECONDS]|join|unjoin|dhcp-block [SECONDS]|dhcp-unblock"; exit 2 ;;
+  *) echo "usage: sh owrt-vm.sh check|start [fg]|start-bg|stop|restart|status|logs|state|gone|test|loop N|cpu [SECONDS]|join|unjoin|dhcp-block [SECONDS]|dhcp-unblock"; exit 2 ;;
 esac
