@@ -337,6 +337,46 @@ M start >/dev/null 2>&1
 M stop >"$T/out" 2>&1
 ok "stale halt state: stop restores the first saved value" '[ "$(halt)" = 200000 ] && clean'
 
+# start-bg: detached start, progress in start.log, ends with "start finished rc=N" (what the plugin waits for)
+M start-bg >"$T/out" 2>&1; rc=$?
+ok "start-bg returns at once with 'start requested'" '[ $rc -eq 0 ] && grep -q "start requested" "$T/out"'
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q "start finished" "$OWRT_DIR/start.log" 2>/dev/null && break; sleep 1; done
+ok "start-bg: start.log ends with start finished rc=0 and the VM runs" 'grep -q "start finished rc=0" "$OWRT_DIR/start.log" && M state | grep -q "^running=1"'
+M start-bg >"$T/out" 2>&1; sleep 2
+ok "start-bg while running: start.log says rc=1 'already running'" 'grep -q "already running" "$OWRT_DIR/start.log" && grep -q "start finished rc=1" "$OWRT_DIR/start.log"'
+M stop >/dev/null 2>&1
+ok "start-bg test leaves nothing" 'clean'
+
+# backups
+echo 1.0.0 > "$OWRT_DIR/VERSION"; head -c 20480 /dev/zero > "$OWRT_DIR/rootfs.img"
+M backups >"$T/out" 2>&1
+ok "backups: empty list prints nothing" '[ $rc -eq 0 ] && [ ! -s "$T/out" ]'
+M backup >"$T/out" 2>&1; rc=$?
+ok "backup: works with the VM stopped" '[ $rc -eq 0 ] && grep -q "done" "$T/out"'
+M backups >"$T/out" 2>&1
+ok "backups: NAME KB RELEASE, parsed the way the plugin does" 'grep -Eq "^[0-9]{8}-[0-9]{6} 20 1\.0\.0$" "$T/out"'
+BK=$(cut -d" " -f1 "$T/out")
+M start >/dev/null 2>&1
+M backup >"$T/out" 2>&1; rc=$?
+ok "backup: refused while the VM runs" '[ $rc -ne 0 ] && grep -q "stop the VM first" "$T/out"'
+M restore "$BK" >"$T/out" 2>&1; rc=$?
+ok "restore: refused while the VM runs" '[ $rc -ne 0 ] && grep -q "stop the VM first" "$T/out"'
+M stop >/dev/null 2>&1
+head -c 4096 /dev/zero | tr '\0' x > "$OWRT_DIR/rootfs.img"
+M restore "$BK" >"$T/out" 2>&1; rc=$?
+ok "restore: puts the backed-up disk back" '[ $rc -eq 0 ] && [ "$(wc -c < "$OWRT_DIR/rootfs.img" | tr -d " ")" = 20480 ] && [ ! -e "$OWRT_DIR/rootfs.img.new" ]'
+echo 1.0.1 > "$OWRT_DIR/VERSION"
+M restore "$BK" >"$T/out" 2>&1; rc=$?
+ok "restore: refused on a different release, disk untouched" '[ $rc -ne 0 ] && grep -q "same release" "$T/out"'
+echo 1.0.0 > "$OWRT_DIR/VERSION"
+M restore ../../etc >"$T/out" 2>&1; rc=$?
+ok "restore: a path instead of a name is refused" '[ $rc -ne 0 ] && grep -q "usage: sh owrt-vm.sh restore" "$T/out"'
+M backup-del "$BK" >"$T/out" 2>&1; rc=$?
+ok "backup-del: removes it" '[ $rc -eq 0 ] && [ ! -e "$OWRT_DIR/backup/$BK" ]'
+M backup-del ../x >"$T/out" 2>&1; rc=$?
+ok "backup-del: a bad name is refused" '[ $rc -ne 0 ]'
+rm -f "$OWRT_DIR/VERSION"
+
 M usage_probe >"$T/out" 2>&1
 ok "usage line lists cpu" 'grep -q "cpu \[SECONDS\]" "$T/out"'
 

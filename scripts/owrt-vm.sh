@@ -850,6 +850,58 @@ cmd_loop() {
   say "loop of $n cycles OK, no leftovers"
 }
 
+# ---------------------------------------------------------------- backups
+# backup/<YYYYmmdd-HHMMSS>/{rootfs.img,release}. The plugin lists them with "backups"
+# (one "NAME KB RELEASE" line per backup, oldest first) and only restores on the same release.
+BACKUP_DIR=$DIR/backup
+bk_name_ok() { case $1 in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) return 0 ;; *) return 1 ;; esac; }
+bk_release() { r=; [ -f "$DIR/VERSION" ] && read -r r < "$DIR/VERSION" 2>/dev/null; echo "$r"; }
+
+cmd_backup() {
+  is_running && die "stop the VM first (a backup of a running disk is not consistent)"
+  [ -f "$DIR/rootfs.img" ] || die "missing $DIR/rootfs.img"
+  n=$(date +%Y%m%d-%H%M%S)
+  b=$BACKUP_DIR/$n
+  mkdir -p "$BACKUP_DIR" || die "cannot create $BACKUP_DIR"
+  [ -e "$b" ] && die "backup $n already exists, try again in a second"
+  mkdir "$b" || die "cannot create $b"
+  if ! cp "$DIR/rootfs.img" "$b/rootfs.img"; then rm -rf "$b"; die "copy failed (disk full?), nothing was kept"; fi
+  bk_release > "$b/release"
+  sync
+  say "backup $n done ($(( $(wc -c < "$b/rootfs.img") / 1024 )) KB)"
+}
+
+cmd_backups() {
+  [ -d "$BACKUP_DIR" ] || return 0
+  for d in "$BACKUP_DIR"/*; do
+    [ -f "$d/rootfs.img" ] || continue
+    n=${d##*/}; bk_name_ok "$n" || continue
+    rel=; read -r rel < "$d/release" 2>/dev/null
+    rel=$(kv_clean "$rel")
+    echo "$n $(( $(wc -c < "$d/rootfs.img") / 1024 ))${rel:+ $rel}"
+  done
+}
+
+cmd_restore() {
+  bk_name_ok "$1" || die "usage: sh owrt-vm.sh restore YYYYmmdd-HHMMSS"
+  b=$BACKUP_DIR/$1
+  [ -f "$b/rootfs.img" ] || die "no such backup: $1"
+  is_running && die "stop the VM first"
+  rel=; read -r rel < "$b/release" 2>/dev/null
+  [ "$rel" = "$(bk_release)" ] || die "backup is from release '${rel:-?}', installed is '$(bk_release)': restore only works on the same release"
+  cp "$b/rootfs.img" "$DIR/rootfs.img.new" || { rm -f "$DIR/rootfs.img.new"; die "copy failed (disk full?), the current disk is untouched"; }
+  mv -f "$DIR/rootfs.img.new" "$DIR/rootfs.img" || die "could not replace rootfs.img"
+  sync
+  say "restored backup $1"
+}
+
+cmd_backup_del() {
+  bk_name_ok "$1" || die "usage: sh owrt-vm.sh backup-del YYYYmmdd-HHMMSS"
+  [ -d "$BACKUP_DIR/$1" ] || die "no such backup: $1"
+  rm -rf "$BACKUP_DIR/$1" || die "could not delete $1"
+  say "deleted backup $1"
+}
+
 case $1 in
   check) cmd_check ;;
   start) cmd_start "$2" ;;
@@ -868,6 +920,10 @@ case $1 in
   status) cmd_status ;;
   logs) cmd_logs ;;
   state) cmd_state ;;
+  backup) cmd_backup ;;
+  backups) cmd_backups ;;
+  restore) cmd_restore "$2" ;;
+  backup-del) cmd_backup_del "$2" ;;
   gone) cmd_gone ;;
   test) cmd_test ;;
   loop) cmd_loop "$2" ;;
@@ -879,5 +935,5 @@ case $1 in
     if [ "$GUEST_DHCP4" = 1 ] && lan_joined; then
       say "WARNING: GUEST_DHCP4=1 and the LAN is joined: Android's DHCP now runs next to OpenWrt's (two servers). Use unjoin to leave, or dhcp-block 0 to block again."
     fi ;;
-  *) echo "usage: sh owrt-vm.sh check|start [fg]|start-bg|stop|restart|status|logs|state|gone|test|loop N|cpu [SECONDS]|join|unjoin|dhcp-block [SECONDS]|dhcp-unblock"; exit 2 ;;
+  *) echo "usage: sh owrt-vm.sh check|start [fg]|start-bg|stop|restart|status|logs|state|gone|backup|backups|restore NAME|backup-del NAME|test|loop N|cpu [SECONDS]|join|unjoin|dhcp-block [SECONDS]|dhcp-unblock"; exit 2 ;;
 esac
