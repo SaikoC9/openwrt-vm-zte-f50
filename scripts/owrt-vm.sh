@@ -787,7 +787,24 @@ kv_clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9._:/-'; }
 # state: one key=value per line for the MatchiTOOL plugin. No other text, no
 # die(), exit 0 always: the plugin reads it every few seconds. Values come from
 # vm.conf or the system, so each one is cleaned before it is printed.
+# vm_etime PID: how long the VM process has run, as MM:SS or H:MM:SS (from /proc, no ps needed)
+vm_etime() {
+  st=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+  rest=${st##*) }
+  set -- $rest
+  [ $# -ge 20 ] || return 0
+  shift 19
+  case $1 in ''|*[!0-9]*) return 0 ;; esac
+  up=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+  case $up in ''|*[!0-9]*) return 0 ;; esac
+  e=$(( up - $1 / CLK_TCK )); [ "$e" -ge 0 ] || e=0
+  if [ "$e" -ge 3600 ]; then printf '%d:%02d:%02d' $((e / 3600)) $((e % 3600 / 60)) $((e % 60))
+  else printf '%02d:%02d' $((e / 60)) $((e % 60)); fi
+}
+
+# state [probe]: key=value lines for the plugin. "probe" adds guest_ping/luci (about 2 s while running).
 cmd_state() {
+  probe=$1
   inst=1
   for f in cloud-hypervisor Image rootfs.img; do [ -f "$DIR/$f" ] || inst=0; done
   ver=
@@ -809,6 +826,7 @@ cmd_state() {
   fi
   mem=$(sed -n 's/^MemAvailable:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$MEMINFO" 2>/dev/null | head -n 1)
   fwd=$(head -n 1 "$IPF" 2>/dev/null)
+  echo "manager_api=1"
   echo "installed=$inst"
   echo "version=$(kv_clean "$ver")"
   echo "running=$run"
@@ -824,6 +842,19 @@ cmd_state() {
   echo "leftovers=$left"
   echo "ip_forward=$(kv_clean "$fwd")"
   echo "mem_avail_kb=$(kv_clean "$mem")"
+  echo "guest_ip=$(kv_clean "$GUEST_IP")"
+  echo "lan_ip=$(kv_clean "$LAN_IP")"
+  echo "web_port=$(kv_clean "$WEB_PORT")"
+  echo "ssh_port=$(kv_clean "$SSH_PORT")"
+  if [ "$run" = 1 ]; then
+    echo "etime=$(vm_etime "$pid")"
+    if [ "$probe" = probe ]; then
+      gp=0; ping -c 1 -W 1 "$GUEST_IP" >/dev/null 2>&1 && gp=1
+      lu=0; [ "$gp" = 1 ] && command -v nc >/dev/null 2>&1 && probe_web && lu=1
+      echo "guest_ping=$gp"
+      echo "luci=$lu"
+    fi
+  fi
   return 0
 }
 
@@ -919,7 +950,7 @@ case $1 in
   restart) cmd_stop; cmd_start "$2" ;;
   status) cmd_status ;;
   logs) cmd_logs ;;
-  state) cmd_state ;;
+  state) cmd_state "$2" ;;
   backup) cmd_backup ;;
   backups) cmd_backups ;;
   restore) cmd_restore "$2" ;;

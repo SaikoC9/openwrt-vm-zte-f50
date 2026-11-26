@@ -221,7 +221,7 @@ M stop >/dev/null 2>&1
 state_ok() { ! grep -qvE '^[a-z_0-9]+=[A-Za-z0-9._:/-]*$' "$1"; }
 val() { sed -n "s/^$1=//p" "$T/st"; }
 M state >"$T/st" 2>&1; rc=$?
-ok "state (stopped): exit 0, only key=value lines" '[ $rc -eq 0 ] && state_ok "$T/st" && [ "$(grep -c "" "$T/st")" = 15 ]'
+ok "state (stopped): exit 0, only key=value lines" '[ $rc -eq 0 ] && state_ok "$T/st" && [ "$(grep -c "" "$T/st")" = 20 ]'
 ok "state (stopped): running 0, no pid, leftovers 0, installed 1" '[ "$(val running)" = 0 ] && [ -z "$(val pid)" ] && [ "$(val leftovers)" = 0 ] && [ "$(val installed)" = 1 ]'
 ok "state: ip_forward and mem_avail_kb read from the system" '[ "$(val ip_forward)" = 0 ] && [ "$(val mem_avail_kb)" = 123456 ]'
 ok "state: settings echoed (cpus, mem, lan, expose, guest_dhcp4)" '[ "$(val cpus)" = 2 ] && [ "$(val mem)" = 256M ] && [ "$(val lan)" = 0 ] && [ "$(val expose)" = 0 ] && [ "$(val guest_dhcp4)" = 0 ]'
@@ -336,6 +336,18 @@ ok "stale halt state: gone exit 1 (leftover)" '[ $rc -eq 1 ]'
 M start >/dev/null 2>&1
 M stop >"$T/out" 2>&1
 ok "stale halt state: stop restores the first saved value" '[ "$(halt)" = 200000 ] && clean'
+
+# state: what the plugin needs for its links and status line
+M start >/dev/null 2>&1
+M state >"$T/st" 2>&1
+ok "state (running): ports and addresses for the LuCI/SSH links" '[ "$(val web_port)" = 8081 ] && [ "$(val ssh_port)" = 2223 ] && [ "$(val guest_ip)" = 192.168.66.2 ] && [ "$(val lan_ip)" = 192.168.88.1 ] && [ "$(val manager_api)" = 1 ] && state_ok "$T/st"'
+ok "state (running): etime is MM:SS or H:MM:SS" 'val etime | grep -Eq "^([0-9]+:)?[0-9][0-9]:[0-9][0-9]$"'
+ok "state (running) without probe: no guest_ping/luci" '! grep -q "^guest_ping=\|^luci=" "$T/st"'
+M state probe >"$T/st" 2>&1
+ok "state probe: guest_ping=1 and luci=1 once the guest answers" '[ "$(val guest_ping)" = 1 ] && [ "$(val luci)" = 1 ] && state_ok "$T/st"'
+M stop >/dev/null 2>&1
+M state probe >"$T/st" 2>&1
+ok "state probe (stopped): no etime, no probe keys" '! grep -q "^etime=\|^guest_ping=\|^luci=" "$T/st"'
 
 # start-bg: detached start, progress in start.log, ends with "start finished rc=N" (what the plugin waits for)
 M start-bg >"$T/out" 2>&1; rc=$?

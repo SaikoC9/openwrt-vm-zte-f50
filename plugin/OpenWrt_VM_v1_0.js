@@ -23,7 +23,7 @@
   const STYLE_ID = 'matchi_owrt_style';
   const BTN_ID = 'matchi_owrt_btn';
   const REPO = 'SaikoC9/openwrt-vm-zte-f50';
-  const RELEASE_TAG = 'v1.0.5';
+  const RELEASE_TAG = 'v1.0.6';
   // Hash of the SHA256SUMS file of RELEASE_TAG (scripts/owrt-release.sh prints it). Empty = unpinned: the download is then only
   // checked against the SHA256SUMS of the same server, and the Maintenance tab says so.
   const PIN_SUMS_SHA256 = '';
