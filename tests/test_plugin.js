@@ -38,8 +38,9 @@ fs.writeFileSync(path.join(build, 'cloud-hypervisor'), Buffer.alloc(5000, 7));
 fs.writeFileSync(path.join(build, 'Image'), Buffer.alloc(8000, 9));
 fs.writeFileSync(path.join(build, 'rootfs.img'), Buffer.concat([Buffer.alloc(3000, 3), Buffer.alloc(60000)]));
 execFileSync('sh', ['-c', 'cd "$1" && sha256sum cloud-hypervisor Image rootfs.img > SHA256SUMS', 'x', build]);
+const REL_VER = (fs.readFileSync(path.join(root, 'plugin', 'OpenWrt_VM_v1_0.js'), 'utf8').match(/const RELEASE_TAG = 'v([0-9.]+)'/) || [])[1];
 const rel = path.join(tmp, 'rel');
-execFileSync('bash', [path.join(root, 'scripts', 'owrt-release.sh'), '--build', build, '--version', '1.0.2', '--out', rel], { stdio: 'pipe' });
+execFileSync('bash', [path.join(root, 'scripts', 'owrt-release.sh'), '--build', build, '--version', REL_VER, '--out', rel], { stdio: 'pipe' });
 
 const T = { dir: DIR, bootFile: BOOT, curl: FAKECURL, base: `file://${rel}` };
 const win = {
@@ -136,10 +137,10 @@ const ctx = vm.createContext({ window: win, btoa: (s) => Buffer.from(s, 'binary'
   const seen = [];
   const done = await A.installRelease((s) => seen.push(s.phase));
   ok('installRelease: finishes with phase done and reports progress phases', done.phase === 'done' && seen.length > 0 && seen[seen.length - 1] === 'done');
-  ok('installRelease: files in place and the installer was written 755', fs.readFileSync(path.join(DIR, 'VERSION'), 'utf8').trim() === '1.0.2' && fs.existsSync(path.join(DIR, 'Image')) && (fs.statSync(path.join(DIR, 'owrt-install.sh')).mode & 0o777) === 0o755 && fs.existsSync(path.join(DIR, 'owrt-vm.sh')));
+  ok('installRelease: files in place and the installer was written 755', fs.readFileSync(path.join(DIR, 'VERSION'), 'utf8').trim() === REL_VER && fs.existsSync(path.join(DIR, 'Image')) && (fs.statSync(path.join(DIR, 'owrt-install.sh')).mode & 0o777) === 0o755 && fs.existsSync(path.join(DIR, 'owrt-vm.sh')));
   ok('installRelease: reports unpinned while PIN_SUMS_SHA256 is empty', done.unpinned === '1');
   st = await A.getState(false);
-  ok('getState after install: installed=1, release 1.0.0, not running, no leftovers', st.installed === '1' && st.running === '0' && st.release === '1.0.2' && st.version === '1.0.2' && st.leftovers === '0');
+  ok('getState after install: installed=1, release 1.0.0, not running, no leftovers', st.installed === '1' && st.running === '0' && st.release === REL_VER && st.version === REL_VER && st.leftovers === '0');
 
   // ---- settings end to end
   await fs.promises.writeFile(path.join(DIR, 'vm.conf'), 'START_SLEEP=1\nCPUS=1\n');

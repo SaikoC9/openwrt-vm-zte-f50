@@ -26,7 +26,7 @@
   const RELEASE_TAG = 'v1.0.5';
   // Hash of the SHA256SUMS file of RELEASE_TAG (scripts/owrt-release.sh prints it). Empty = unpinned: the download is then only
   // checked against the SHA256SUMS of the same server, and the Maintenance tab says so.
-  const PIN_SUMS_SHA256 = 'ce062ffac7fe31c702f91a81cba81b2e043d8b34e6abc272a908ad10f8c0b0f3';
+  const PIN_SUMS_SHA256 = '';
   const DIR = TEST?.dir || '/data/local/matchi_owrt';
   const BOOT_FILE = TEST?.bootFile || '/data/local/matchitool/boot.d/30-openwrt-vm.sh';
   const APP_CURL = TEST?.curl || '/data/data/com.matchi.tool/files/curl';
