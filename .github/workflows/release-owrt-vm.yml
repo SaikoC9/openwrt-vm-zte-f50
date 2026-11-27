@@ -59,6 +59,7 @@ jobs:
           bash scripts/test_owrt_release.sh
           bash scripts/test_owrt_install.sh
           bash scripts/test_guest.sh
+          bash scripts/test_owrt_usb_mac.sh
       - name: Build dependencies
         # No gcc-multilib here: on this image it conflicts with the arm64 cross compiler
         # the VMM build needs. It is swapped in for the guest build below.
