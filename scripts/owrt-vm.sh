@@ -1,77 +1,21 @@
 #!/system/bin/sh
-# owrt-vm.sh - MatchiTOOL OpenWrt VM manager.
-# Phase 4 (minimal manager) + Phase 5 step 1 (WAN: tap, NAT, DNS) + step 2 (port forwards)
-# + step 3a (LAN tap) + step 3b (join the LAN tap to br0) + step 4b (block
-# Android's DHCP on br0) + step 4c (OpenWrt serves DHCPv4 on the joined LAN)
-# + Phase 6 step 3 (state and gone commands for the MatchiTOOL plugin, DIR
-# defaults to the folder of this script).
+# owrt-vm.sh - MatchiTOOL OpenWrt VM manager (cloud-hypervisor + KVM).
 #
-# Usage (as root on the F50, in the folder that holds the files):
-#   sh owrt-vm.sh check        read-only checks (caps, /dev/kvm, tun, cellular)
-#   sh owrt-vm.sh start        boot in background, console goes to console.log;
-#                              returns when the guest answers ping AND LuCI
-#   sh owrt-vm.sh start fg     boot in this terminal (console on screen)
-#   sh owrt-vm.sh stop         stop the VM and undo every network change
-#   sh owrt-vm.sh test         host to guest check: SSH banner + LuCI answer
-#                              (+ guest LAN ping when LAN=1)
-#                              (retries up to TEST_WAIT s, exit 1 on failure)
-#   sh owrt-vm.sh join         step 3b: join owrt-lan to br0 (see below)
-#   sh owrt-vm.sh unjoin       undo join, the VM keeps running
-#   sh owrt-vm.sh dhcp-block [SECONDS]   step 4b: drop Android's DHCP on br0
-#   sh owrt-vm.sh dhcp-unblock undo the block (also done by unjoin, stop, reboot)
-#   sh owrt-vm.sh restart | status | logs | loop N
-#   sh owrt-vm.sh cpu [SECONDS]  CPU use per VMM thread (default 5 s, 100% = one core)
-#   sh owrt-vm.sh state        for the plugin: key=value lines, nothing else, exit 0
-#   sh owrt-vm.sh gone         silent; exit 0 only when the VM is stopped and
-#                              nothing is left behind (see: leftovers)
+# The VM is reachable only from clients on the F50 hotspot or USB tethering.
+# start joins the guest LAN (192.168.88.0/24) to br0, OpenWrt serves DHCP there,
+# Android's DHCP on br0 is blocked. Forwards: hotspot port SSH_PORT -> guest 22,
+# WEB_PORT -> guest 80.
 #
-# state keys: installed (1 when cloud-hypervisor, Image and rootfs.img are all
-# there), version (first line of DIR/VERSION, empty when missing), running, pid,
-# cpus, mem, lan, joined, dhcp_block, dhcp_block_secs (seconds until the
-# auto-unblock, 0 when there is no timer or no block), expose, guest_dhcp4,
-# leftovers (-1 while running: taps and rules are expected then),
-# ip_forward, mem_avail_kb.
+# Usage (root, in the folder with the files):
+#   sh owrt-vm.sh check | start [fg] | start-bg | stop | restart | status | logs
+#   sh owrt-vm.sh test | loop N | cpu [SECONDS]
+#   sh owrt-vm.sh join | unjoin | dhcp-block [SECONDS] | dhcp-unblock
+#   sh owrt-vm.sh backup | backups | restore NAME | backup-del NAME
+#   sh owrt-vm.sh state [probe] | gone      (for the plugin)
 #
-# LAN=1 (Phase 5 step 3a): gives the guest its second NIC (eth1, LAN) on a
-# SEPARATE tap, owrt-lan, host 192.168.88.2 <-> guest 192.168.88.1. It is not
-# joined to br0 unless you join it (step 3b).
-#
-# Step 3b (option B: Android keeps 192.168.0.1, the guest LAN stays
-# 192.168.88.0/24): join makes owrt-lan a port of br0 and moves the host
-# address 192.168.88.2 from the tap onto br0. It checks that the guest LAN
-# answers through br0 and undoes itself when it does not. It is refused until
-# GUEST_DHCP_OFF=1 is set in vm.conf: OpenWrt's default LAN config serves DHCP
-# and RA, so without turning those off on the guest every hotspot client would
-# get answers from OpenWrt as well as from Android.
-#   join / unjoin   by hand, while the VM runs
-#   LAN_JOIN=1      start joins by itself once the guest LAN answers
-#
-# Step 4b: dhcp-block adds ONE rule in our own chain OWRT_IN (filter INPUT,
-# -i br0, udp dport 67, DROP). The DHCP server of the F50 hotspot is inside
-# system_server (not dnsmasq), a wildcard UDP listener on port 67; this drops
-# its input only. It does NOT make OpenWrt serve DHCP (that is step 4c): with
-# the guest DHCP off, clients that join or renew while blocked get NO address.
-# Safety: it needs the VM running, it removes itself after BLOCK_TIMEOUT
-# seconds (default 180; 0 = never), and unjoin, stop, any failed start and a
-# phone reboot remove it. Recovery over USB: adb shell, su, sh owrt-vm.sh stop.
-#
-# Step 4c: GUEST_DHCP4=1 in vm.conf says the guest LAN serves DHCPv4 (dhcp.lan
-# ignore=0, dhcpv4=server; DHCPv6 and RA still disabled). It replaces
-# GUEST_DHCP_OFF=1 (both together are refused). With it, join also blocks
-# Android's DHCP on br0 (no auto-unblock), because two DHCP servers on one LAN
-# are a conflict; if the block fails, join undoes itself. unjoin, stop and any
-# failed start remove join and block. A manual dhcp-unblock while joined warns.
-#
-# Idle CPU: the VM should cost almost nothing when the guest has nothing to do.
-# "cpu" shows where the time goes (vcpuN = guest running or the host polling
-# for it, other threads = disk, net, serial). HALT_POLL=0 (default) turns off
-# KVM halt polling while the VM runs, so an idle vCPU sleeps instead of
-# spinning before it blocks; the old value is put back by stop and by any
-# failed start. HALT_POLL= (empty) leaves the host setting alone.
-#
-# SAFETY RULE: every change is recorded and undone by stop, and by any
-# failed start. Android's br0, usb0 and wlan0 are touched ONLY by join (one
-# port added to br0, one address added to br0); stop and unjoin remove both.
+# Safety: every change is recorded and undone by stop and by any failed start.
+# br0 is touched only by join (one port, one address, one FORWARD accept) and
+# dhcp-block (one INPUT rule). Recovery over USB: adb shell, su, sh owrt-vm.sh stop.
 # Settings: optional vm.conf next to this script (see owrt-vm.conf.example).
 
 # Folder of this script (also where the auto-unblock timer finds it again).
@@ -99,7 +43,7 @@ PREFIX=24
 MASK=255.255.255.0
 NET_CIDR=192.168.66.0/24
 MAC=52:54:00:66:00:02
-LAN=0
+LAN=1
 LAN_TAP=owrt-lan
 HOST_LAN_IP=192.168.88.2
 LAN_PREFIX=24
@@ -108,15 +52,14 @@ LAN_WAIT=30
 LAN_IP=192.168.88.1
 LAN_MASK=255.255.255.0
 LAN_NET=192.168.88.0/24
-LAN_JOIN=0
+LAN_JOIN=1
 LAN_BRIDGE=br0
 LAN_TAP_MAC=fe:54:00:66:00:04
-GUEST_DHCP_OFF=0
-GUEST_DHCP4=0
+GUEST_DHCP4=1
 JOIN_WAIT=10
 BLOCK_TIMEOUT=180
 DNS_UP=8.8.8.8
-EXPOSE=0
+EXPOSE=1
 EXPOSE_IF=br0
 HOTSPOT_NET=
 SSH_PORT=2223
@@ -258,6 +201,7 @@ lan_joined() {
 # Undo join. Safe to run at any time, also when nothing is joined.
 lan_unjoin() {
   dhcp_unblock
+  while ipt -D OWRT_FWD -i "$LAN_BRIDGE" -o "$LAN_BRIDGE" -j ACCEPT 2>/dev/null; do :; done
   lan_joined && ip addr del "$HOST_LAN_IP/$LAN_PREFIX" dev "$LAN_BRIDGE" 2>/dev/null
   if ip link show dev "$LAN_TAP" >/dev/null 2>&1; then
     ip link set dev "$LAN_TAP" nomaster 2>/dev/null
@@ -273,15 +217,7 @@ lan_unjoin() {
 lan_join() {
   is_running || { say "join: the VM is not running"; return 1; }
   [ "$NET" = 1 ] && [ "$LAN" = 1 ] || { say "join: needs NET=1 and LAN=1"; return 1; }
-  if [ "$GUEST_DHCP_OFF" = 1 ] && [ "$GUEST_DHCP4" = 1 ]; then
-    say "join refused: GUEST_DHCP_OFF=1 and GUEST_DHCP4=1 are both set; the guest LAN either serves DHCP or not. Set only one"
-    return 1
-  fi
-  [ "$GUEST_DHCP_OFF" = 1 ] || [ "$GUEST_DHCP4" = 1 ] || {
-    say "join refused: GUEST_DHCP_OFF is not 1 (and GUEST_DHCP4 is not 1). Either turn DHCP, DHCPv6 and RA off on the guest LAN"
-    say "(uci set dhcp.lan.ignore=1 ...) and put GUEST_DHCP_OFF=1 in vm.conf, or enable DHCPv4 on it and put GUEST_DHCP4=1. See OPENWRT_VM_PLAN.txt, steps 3b and 4c."
-    return 1
-  }
+  [ "$GUEST_DHCP4" = 1 ] || { say "join refused: GUEST_DHCP4 must be 1 (OpenWrt is the DHCP server of the hotspot LAN)"; return 1; }
   has_net_admin || { say "join: root has no CAP_NET_ADMIN"; return 1; }
   ip link show dev "$LAN_BRIDGE" >/dev/null 2>&1 || { say "join: bridge $LAN_BRIDGE not found"; return 1; }
   ip link show dev "$LAN_TAP" >/dev/null 2>&1 || { say "join: tap $LAN_TAP not found"; return 1; }
@@ -296,6 +232,13 @@ lan_join() {
   must ip link set dev "$LAN_TAP" master "$LAN_BRIDGE" || { lan_unjoin; return 1; }
   must ip addr add "$HOST_LAN_IP/$LAN_PREFIX" dev "$LAN_BRIDGE" || { lan_unjoin; return 1; }
   ip link set dev "$LAN_TAP" up 2>/dev/null
+  # Frames between a hotspot client (usb0/wlan0) and the guest are only BRIDGED, but
+  # when the kernel runs them through iptables (bridge-nf) they hit FORWARD, where
+  # Android's tetherctrl_FORWARD drops everything that is not tether-to-cellular.
+  # Host pings of the guest never see FORWARD (INPUT/OUTPUT), so join looked fine
+  # while DHCP and SSH from clients timed out. Accept br0 -> br0 in our own chain.
+  ipt -n -L OWRT_FWD >/dev/null 2>&1 &&
+    must ipt -I OWRT_FWD 1 -i "$LAN_BRIDGE" -o "$LAN_BRIDGE" -j ACCEPT || { lan_unjoin; return 1; }
   i=0; ok=0
   while [ "$i" -lt "$JOIN_WAIT" ]; do
     if ping -c 1 -W 1 "$LAN_IP" >/dev/null 2>&1; then ok=1; break; fi
@@ -587,7 +530,7 @@ cmd_check() {
   say "ip_forward: $(cat "$IPF" 2>/dev/null)"
   say "ip rules:"; ip rule show 2>/dev/null | sed 's/^/  /' | head -20
   say "guest LAN: LAN=$LAN (tap $LAN_TAP, host $HOST_LAN_IP/$LAN_PREFIX <-> guest $LAN_IP)"
-  say "LAN join: LAN_JOIN=$LAN_JOIN, bridge $LAN_BRIDGE $(ip link show dev "$LAN_BRIDGE" >/dev/null 2>&1 && echo present || echo MISSING), subnet $(detect_hotspot_net "$LAN_BRIDGE"), GUEST_DHCP_OFF=$GUEST_DHCP_OFF, GUEST_DHCP4=$GUEST_DHCP4"
+  say "LAN join: LAN_JOIN=$LAN_JOIN, bridge $LAN_BRIDGE $(ip link show dev "$LAN_BRIDGE" >/dev/null 2>&1 && echo present || echo MISSING), subnet $(detect_hotspot_net "$LAN_BRIDGE"), GUEST_DHCP4=$GUEST_DHCP4"
   say "DHCP block: BLOCK_TIMEOUT=${BLOCK_TIMEOUT}s on $LAN_BRIDGE (sh owrt-vm.sh dhcp-block / dhcp-unblock)"
   say "forwards: EXPOSE=$EXPOSE on $EXPOSE_IF, SSH host port $SSH_PORT, LuCI host port $WEB_PORT"
   for p in "$SSH_PORT" "$WEB_PORT" 8080; do
@@ -621,8 +564,7 @@ cmd_start() {
   [ "$LAN" = 1 ] && [ "$NET" != 1 ] && die "LAN=1 needs NET=1 (eth0 is the WAN NIC). Nothing was changed."
   if [ "$LAN_JOIN" = 1 ]; then
     [ "$LAN" = 1 ] || die "LAN_JOIN=1 needs LAN=1. Nothing was changed."
-    [ "$GUEST_DHCP_OFF" = 1 ] && [ "$GUEST_DHCP4" = 1 ] && die "GUEST_DHCP_OFF=1 and GUEST_DHCP4=1 are both set. Set only one. Nothing was changed."
-    [ "$GUEST_DHCP_OFF" = 1 ] || [ "$GUEST_DHCP4" = 1 ] || die "LAN_JOIN=1 needs GUEST_DHCP_OFF=1 (DHCP, DHCPv6 and RA off on the guest LAN first) or GUEST_DHCP4=1 (guest serves DHCPv4). Nothing was changed."
+    [ "$GUEST_DHCP4" = 1 ] || die "LAN_JOIN=1 needs GUEST_DHCP4=1. Nothing was changed."
     ip link show dev "$LAN_BRIDGE" >/dev/null 2>&1 || die "bridge $LAN_BRIDGE not found. Nothing was changed."
   fi
   mkdir -p "$RUN" || die "cannot create $RUN"

@@ -82,8 +82,9 @@ unz() {
 vm_running() {
   [ -f "$DIR/run/vm.pid" ] || return 1
   read -r vp < "$DIR/run/vm.pid" 2>/dev/null || return 1
-  [ -n "$vp" ] && kill -0 "$vp" 2>/dev/null || return 1
-  tr '\0' ' ' < "/proc/$vp/cmdline" 2>/dev/null | grep -q cloud-hypervisor
+  case $vp in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$vp" 2>/dev/null || return 1
+  ps -A -o PID,ARGS 2>/dev/null | grep -q "^ *$vp .*cloud-hypervisor"
 }
 
 free_kb() {

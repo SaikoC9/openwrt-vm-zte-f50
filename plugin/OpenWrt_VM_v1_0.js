@@ -1,10 +1,10 @@
 // @matchi-name OpenWrt VM (F50)
-// @matchi-version 1.0
+// @matchi-version 1.7
 // @matchi-author saiko
 // @matchi-description OpenWrt in a KVM virtual machine on the F50: install from a release or import your own openwrt-vm-arm64.tar.gz, start/stop, hotspot mode, settings, backups, rollback, boot start.
 // @matchi-requires root, curl
 /*
- * OpenWrt VM (F50) for MatchiTOOL (plugin version 1.0)
+ * OpenWrt VM (F50) for MatchiTOOL (plugin version 1.7)
  * Copyright (c) 2026 saiko (GitHub: SaikoC9). MIT License. A plugin for MatchiTOOL.
  * The VM files (cloud-hypervisor, kernel Image, OpenWrt disk, manager script) are downloaded from the release below
  * and checked against SHA256SUMS; PIN_SUMS_SHA256 makes the plugin install only that exact release.
@@ -124,8 +124,9 @@ unz() {
 vm_running() {
   [ -f "$DIR/run/vm.pid" ] || return 1
   read -r vp < "$DIR/run/vm.pid" 2>/dev/null || return 1
-  [ -n "$vp" ] && kill -0 "$vp" 2>/dev/null || return 1
-  tr '\\0' ' ' < "/proc/$vp/cmdline" 2>/dev/null | grep -q cloud-hypervisor
+  case $vp in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$vp" 2>/dev/null || return 1
+  ps -A -o PID,ARGS 2>/dev/null | grep -q "^ *$vp .*cloud-hypervisor"
 }
 
 free_kb() {
@@ -502,7 +503,7 @@ esac
 
   // ------------------------------------------------------------------ settings
   const MANAGED = ['CPUS', 'MEM', 'EXPOSE', 'LAN', 'LAN_JOIN', 'GUEST_DHCP4', 'SSH_PORT', 'WEB_PORT', 'DNS_UP', 'WAN_IF'];
-  const DEFAULTS = { cpus: 2, mem: '256M', hotspot: false, expose: false, sshPort: 2223, webPort: 8081, dnsUp: '8.8.8.8', wanIf: 'sipa_eth0' };
+  const DEFAULTS = { cpus: 2, mem: '256M', hotspot: true, expose: true, sshPort: 2223, webPort: 8081, dnsUp: '8.8.8.8', wanIf: 'sipa_eth0' };
   const MEM_CHOICES = ['128M', '192M', '256M', '384M', '512M'];
   const BLOCK_BEGIN = '# --- managed by the OpenWrt VM plugin (edit in the plugin; lines outside this block are kept) ---';
   const BLOCK_END = '# --- end of plugin block ---';
@@ -776,17 +777,35 @@ esac
     const part = `${IMPORT_FILE}.part`;
     const r0 = await runRoot(`mkdir -p ${IMPORT_DIR} && chmod 700 ${IMPORT_DIR} && rm -f ${IMPORT_FILE} && (umask 077; : > ${part}) && echo READY`);
     if (!r0.ok || !r0.text.includes('READY')) throw new Error(`Could not prepare ${IMPORT_DIR}: ${r0.text.slice(0, 120)}`);
-    const sizeOf = async () => Number((await runRoot(`wc -c < ${part}`)).text) || 0;
+    // Size of the part file on the device, or -1 when it could not be read (a failed read is not "0 bytes").
+    const sizeOf = async () => {
+      for (let t = 0; t < 4; t += 1) {
+        const r = await runRoot(`wc -c < ${part}`, 15000);
+        const n = /^\d+$/.test(r.text) ? Number(r.text) : -1;
+        if (n >= 0) return n;
+        await sleep(400 * (t + 1));
+      }
+      return -1;
+    };
+    const MAX_TRIES = 6;
     for (let off = 0; off < buf.length; off += IMPORT_CHUNK) {
       const piece = buf.subarray(off, off + IMPORT_CHUNK);
       const cmd = `[ "$(wc -c < ${part})" = ${off} ] && echo ${b64bytes(piece)} | base64 -d >> ${part} && echo CHUNK_OK || echo CHUNK_BAD`;
-      let r = await runRoot(cmd, 30000);
-      if (!r.text.includes('CHUNK_OK')) {
+      let lastText = '';
+      let okChunk = false;
+      for (let tries = 0; tries < MAX_TRIES && !okChunk; tries += 1) {
+        if (tries > 0) await sleep(500 * tries);
+        const r = await runRoot(cmd, 30000);
+        lastText = r.text;
+        if (r.text.includes('CHUNK_OK')) { okChunk = true; break; }
+        // The answer may have been lost, or only part of the piece landed: ask the device what it really has.
         const now = await sizeOf();
-        if (now === off + piece.length) r = { text: 'CHUNK_OK' };          // it landed, only the answer was lost
-        else if (now === off) r = await runRoot(cmd, 30000);               // nothing landed: once more
+        if (now === off + piece.length) { okChunk = true; break; }          // it landed, only the answer was lost
+        if (now > off) {                                                     // a partial write: cut the file back to the piece start
+          await runRoot(`truncate -s ${off} ${part}`, 15000);
+        }
       }
-      if (!r.text.includes('CHUNK_OK')) throw new Error(`Upload stopped at ${Math.round(off / 1024)} KB of ${Math.round(buf.length / 1024)} KB`);
+      if (!okChunk) throw new Error(`Upload stopped at ${Math.round(off / 1024)} KB of ${Math.round(buf.length / 1024)} KB after ${MAX_TRIES} tries (last answer: ${String(lastText).slice(0, 80) || 'none'})`);
       onProgress?.({ pct: Math.max(1, Math.min(80, Math.round(((off + piece.length) / buf.length) * 80))), msg: 'sending to the device' });
     }
     const fin = await runRoot(`[ "$(wc -c < ${part})" = ${buf.length} ] && mv -f ${part} ${IMPORT_FILE} && echo MOVED`);
@@ -881,7 +900,7 @@ esac
     return left > 0 ? ['warn', 'Stopped', `${left} leftover: press Stop`] : ['off', 'Stopped', 'VM is off'];
   };
 
-  const sshText = (st) => (st.joined === '1' ? `root@${st.lan_ip}` : st.expose === '1' ? `hotspot address, port ${st.ssh_port}` : `root@${st.guest_ip} (phone only)`);
+  const sshText = (st) => (st.joined === '1' ? `root@${st.lan_ip}` : `hotspot address, port ${st.ssh_port}`);
 
   const paint = (st) => {
     lastState = st;
@@ -907,7 +926,7 @@ esac
     const card = q('#ow_accesscard');
     if (card) card.style.display = run ? '' : 'none';
     const url = luciUrl(st, location.hostname);
-    setText('#ow_access', url ? `LuCI  ${url}` : 'No LuCI address. Turn on "LuCI and SSH from hotspot" in Settings.');
+    setText('#ow_access', url ? `LuCI  ${url}` : 'No LuCI address from this page.');
     const cl = q('#ow_copy_luci'); if (cl) { cl.dataset.v = url || ''; cl.style.display = url ? '' : 'none'; }
     if (run) {
       const ssh = sshText(st);
@@ -927,8 +946,6 @@ esac
     const s = confToSettings(await readConf());
     q('#ow_cpus').value = String(s.cpus);
     q('#ow_mem_sel').value = s.mem;
-    q('#ow_hotspot').checked = s.hotspot;
-    q('#ow_expose').checked = s.expose;
     q('#ow_ssh').value = String(s.sshPort);
     q('#ow_web').value = String(s.webPort);
     q('#ow_dns').value = s.dnsUp;
@@ -936,7 +953,7 @@ esac
     q('#ow_boot').checked = await bootOn();
   };
   const readSettingsForm = () => ({
-    cpus: q('#ow_cpus').value, mem: q('#ow_mem_sel').value, hotspot: q('#ow_hotspot').checked, expose: q('#ow_expose').checked,
+    cpus: q('#ow_cpus').value, mem: q('#ow_mem_sel').value, hotspot: true, expose: true,
     sshPort: q('#ow_ssh').value, webPort: q('#ow_web').value, dnsUp: q('#ow_dns').value.trim(), wanIf: q('#ow_wan').value.trim(),
   });
 
@@ -983,44 +1000,60 @@ esac
     const M = `#${MODAL_NAME}`;
     style.textContent = `
       ${M}{width:94vw !important}
-      ${M} .ow-wrap{display:flex;flex-direction:column;gap:8px;max-height:74svh;overflow-y:auto;overflow-x:hidden;padding-bottom:20px;-webkit-overflow-scrolling:touch;font-size:.8rem}
-      ${M} .ow-card{padding:9px 11px;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:rgba(255,255,255,.045)}
+      ${M} .ow-wrap{--ow-line:rgba(255,255,255,.09);--ow-fill:rgba(255,255,255,.05);--ow-acc:#6aa8ff;display:flex;flex-direction:column;gap:7px;max-height:78svh;overflow-y:auto;overflow-x:hidden;padding:1px 3px 6px;-webkit-overflow-scrolling:touch;font-size:.76rem;scrollbar-width:thin}
+      ${M} .ow-card{padding:7px 9px;border:1px solid var(--ow-line);border-radius:10px;background:var(--ow-fill)}
       ${M} .ow-r{display:flex;align-items:center;justify-content:space-between;gap:8px}
-      ${M} .ow-r + .ow-r{margin-top:6px}
-      ${M} .ow-bs{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-      ${M} .ow-head{display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:12px;border:1px solid;--c:#ffd76a;color:var(--c);background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.14)}
-      ${M} .ow-head.on{--c:#64e6a4;background:rgba(100,230,164,.09);border-color:rgba(100,230,164,.35)}
-      ${M} .ow-head.warn{--c:#ffd76a;background:rgba(255,215,106,.09);border-color:rgba(255,215,106,.35)}
-      ${M} .ow-head.off{--c:#ff8a8a;background:rgba(255,138,138,.09);border-color:rgba(255,138,138,.35)}
-      ${M} .ow-dot{width:10px;height:10px;border-radius:50%;background:var(--c);flex:none}
-      ${M} .ow-ht{flex:1;min-width:0}
-      ${M} .ow-h1{font-weight:800;font-size:.92rem;overflow-wrap:anywhere}
-      ${M} .ow-sub{font-size:.68rem;opacity:.8;color:inherit;overflow-wrap:anywhere}
-      ${M} .ow-tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
-      ${M} .ow-tile{padding:6px 9px;border-radius:9px;background:rgba(255,255,255,.06)}
-      ${M} .ow-tile small{display:block;font-size:.64rem;opacity:.65}
-      ${M} .ow-tile b{font-weight:800;font-size:.78rem;overflow-wrap:anywhere}
-      ${M} .ow-mono{font:.66rem ui-monospace,Menlo,Consolas,monospace;overflow-wrap:anywhere;min-width:0}
-      ${M} .ow-note{opacity:.72;font-size:.66rem;margin-top:6px;line-height:1.4;overflow-wrap:anywhere}
-      ${M} .ow-lbl{font-size:.66rem;opacity:.65;margin:8px 0 5px;display:block}
-      ${M} .ow-pre{margin:6px 0 0;padding:8px 10px;border-radius:9px;background:rgba(0,0,0,.3);font:.62rem/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:34vh;overflow:auto}
-      ${M} button{display:inline-flex;align-items:center;gap:4px;height:24px;min-height:24px;padding:2px 9px;border-radius:7px;font-size:.7rem;line-height:1;white-space:nowrap;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+      ${M} .ow-r + .ow-r{margin-top:5px}
+      ${M} .ow-bs{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+      ${M} .ow-head{display:flex;align-items:center;gap:9px;padding:7px 8px 7px 11px;border-radius:12px;border:1px solid color-mix(in srgb,var(--c) 28%,var(--ow-line));--c:#ffd76a;background:color-mix(in srgb,var(--c) 9%,transparent)}
+      ${M} .ow-head.on{--c:#4fe3a0}
+      ${M} .ow-head.warn{--c:#ffd76a}
+      ${M} .ow-head.off{--c:#ff7b7b}
+      ${M} .ow-dot{width:9px;height:9px;border-radius:50%;background:var(--c);box-shadow:0 0 9px var(--c);flex:none}
+      ${M} .ow-head.on .ow-dot{animation:owpulse 2.2s ease-in-out infinite}
+      @keyframes owpulse{50%{opacity:.45}}
+      @media (prefers-reduced-motion:reduce){${M} .ow-head.on .ow-dot{animation:none}}
+      ${M} .ow-ht{flex:1;min-width:0;display:flex;flex-wrap:wrap;align-items:baseline;gap:1px 8px}
+      ${M} .ow-h1{font-weight:800;font-size:.9rem;color:var(--c);overflow-wrap:anywhere}
+      ${M} .ow-sub{font-size:.66rem;opacity:.72;overflow-wrap:anywhere}
+      ${M} .ow-acts{display:flex;flex-wrap:wrap;gap:5px}
+      ${M} .ow-acts button{flex:1 1 auto;justify-content:center}
+      ${M} .ow-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}
+      @media (max-width:430px){${M} .ow-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+      ${M} .ow-tile{padding:5px 8px;border-radius:9px;border:1px solid var(--ow-line);background:var(--ow-fill);min-width:0}
+      ${M} .ow-tile small{display:block;font-size:.58rem;letter-spacing:.04em;text-transform:uppercase;opacity:.55}
+      ${M} .ow-tile b{display:block;font-weight:700;font-size:.72rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      ${M} .ow-mono{font:.64rem ui-monospace,Menlo,Consolas,monospace;overflow-wrap:anywhere;min-width:0}
+      ${M} .ow-note:empty{display:none}
+      ${M} .ow-sv2{margin-top:5px;align-items:flex-end}
+      ${M} .ow-note{opacity:.62;font-size:.62rem;margin-top:5px;line-height:1.35;overflow-wrap:anywhere}
+      ${M} .ow-lbl{font-size:.6rem;letter-spacing:.05em;text-transform:uppercase;opacity:.55;margin:7px 0 4px;display:block}
+      ${M} .ow-pre{margin:5px 0 0;padding:7px 9px;border-radius:8px;background:rgba(0,0,0,.32);font:.6rem/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:24vh;overflow:auto}
+      ${M} button{display:inline-flex;align-items:center;gap:4px;box-sizing:border-box;overflow:visible;height:24px;min-height:24px;padding:2px 10px;border-radius:7px;font-size:.68rem;line-height:1;white-space:nowrap;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
       ${M} button.ow-ic{padding:2px 6px}
-      ${M} button.ow-pri{background:rgba(80,160,255,.28);font-weight:800}
+      ${M} button.ow-pri{background:color-mix(in srgb,var(--ow-acc) 30%,transparent);border-color:color-mix(in srgb,var(--ow-acc) 55%,transparent);font-weight:800}
       ${M} button.ow-dng{color:#ff8a8a}
-      ${M} button:disabled{opacity:.5}
-      ${M} input[type=number],${M} input[type=text]{height:28px;padding:3px 8px;border-radius:8px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.25);color:inherit;width:100%;box-sizing:border-box;font-size:.75rem}
-      ${M} .ow-f{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 8px;margin-top:8px}
-      ${M} .ow-f label{display:block;margin:0;font-size:.64rem;opacity:.75}
-      ${M} .ow-f select{width:100%;height:28px;padding:3px 6px;border-radius:8px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.25);color:inherit;font-size:.75rem}
-      ${M} label.ow-sw{display:flex;gap:8px;align-items:center;margin-top:6px;font-size:.75rem}
-      ${M} details>summary{cursor:pointer;font-weight:800;font-size:.8rem;list-style:none}
-      ${M} details>summary::-webkit-details-marker{display:none}
-      ${M} details>summary::before{content:"\\25BE  "}
-      ${M} details:not([open])>summary::before{content:"\\25B8  "}
-      ${M} .ow-bar{height:5px;border-radius:4px;background:rgba(255,255,255,.12);overflow:hidden;margin-top:8px}
-      ${M} .ow-bar > i{display:block;height:100%;width:0;background:#64a6ff;transition:width .3s}
-      ${M} .ow-brow span.ow-bl{flex:1 1 auto;font-size:.68rem;overflow-wrap:anywhere;min-width:0}`;
+      ${M} button:disabled{opacity:.45}
+      ${M} .ow-sec{display:flex;align-items:center;gap:8px;margin:5px 0 0;font-size:.6rem;letter-spacing:.06em;text-transform:uppercase;font-weight:800;opacity:.7}
+      ${M} .ow-sec::after{content:"";flex:1;height:1px;background:var(--ow-line)}
+      ${M} .ow-pn{padding:2px 1px 0}
+      ${M} input[type=number],${M} input[type=text]{height:26px;padding:2px 7px;border-radius:7px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.25);color:inherit;width:100%;box-sizing:border-box;font-size:.72rem}
+      ${M} .ow-f{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px 7px}
+      @media (max-width:430px){${M} .ow-f{grid-template-columns:repeat(2,minmax(0,1fr))}}
+      ${M} .ow-f label{display:block;margin:0 0 2px;font-size:.58rem;letter-spacing:.04em;text-transform:uppercase;opacity:.6}
+      ${M} .ow-f select{width:100%;height:26px;padding:2px 5px;border-radius:7px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.25);color:inherit;font-size:.72rem}
+      ${M} label.ow-sw{position:relative;display:flex !important;align-items:center;justify-content:space-between;gap:10px;min-height:30px;margin:0 !important;padding:0 !important;font-size:.72rem;line-height:1.2;border-top:1px solid var(--ow-line);cursor:pointer}
+      ${M} label.ow-sw:first-of-type{margin-top:8px !important}
+      ${M} label.ow-sw input.ow-cb{position:absolute !important;opacity:0 !important;width:1px !important;height:1px !important;min-width:0 !important;margin:0 !important;padding:0 !important;border:0 !important;pointer-events:none;-webkit-appearance:none;appearance:none}
+      ${M} label.ow-sw i.ow-tg{display:block;position:relative;flex:none;box-sizing:border-box;width:32px;height:18px;border-radius:9px;background:rgba(255,255,255,.24);transition:background .15s;overflow:visible}
+      ${M} label.ow-sw i.ow-tg::after{content:"";position:absolute;top:3px;left:3px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.4);transition:left .15s}
+      ${M} label.ow-sw input.ow-cb:checked + i.ow-tg{background:#3fbf86}
+      ${M} label.ow-sw input.ow-cb:checked + i.ow-tg::after{left:17px}
+      ${M} label.ow-sw input.ow-cb:focus-visible + i.ow-tg{outline:2px solid var(--ow-acc);outline-offset:2px}
+      ${M} .ow-sv{display:flex;justify-content:flex-end;margin-top:7px}
+      ${M} .ow-bar{height:3px;border-radius:3px;background:rgba(255,255,255,.12);overflow:hidden;margin-top:6px}
+      ${M} .ow-bar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,#4f8dff,#6fe0ff);transition:width .3s}
+      ${M} .ow-brow span.ow-bl{flex:1 1 auto;font-size:.64rem;overflow-wrap:anywhere;min-width:0}`;
     document.head.appendChild(style);
   };
 
@@ -1037,7 +1070,7 @@ esac
     session += 1; busy = 0;
     const modalApi = window.matchi?.modal;
     const created = (modalApi ? modalApi.create : createModal)({
-      name: MODAL_NAME, title: TITLE, maxWidth: '640px', contentStyle: 'max-height:80vh;', showConfirm: false,
+      name: MODAL_NAME, title: TITLE, maxWidth: '560px', contentStyle: 'max-height:80vh;', showConfirm: false,
       onClose: () => { if (timer) clearInterval(timer); timer = null; session += 1; return true; },
       content: `
         <div class="ow-wrap">
@@ -1046,17 +1079,13 @@ esac
             <div class="ow-ht"><div id="ow_hero" class="ow-h1">Checking…</div><div id="ow_sub" class="ow-sub"></div></div>
             <button type="button" class="ow-act ow-ic" id="ow_refresh" aria-label="Refresh" title="Refresh">${ico('refresh')}</button>
           </div>
-          <div class="ow-bs">
+          <div class="ow-acts">
             <button type="button" class="ow-act ow-pri" id="ow_start">${ico('play')}Start</button>
             <button type="button" class="ow-act" id="ow_stop">${ico('stop')}Stop</button>
             <button type="button" class="ow-act" id="ow_luci">${ico('ext')}LuCI</button>
             <button type="button" class="ow-act" id="ow_test">${ico('act')}Test</button>
             <button type="button" class="ow-act" id="ow_join">Join hotspot</button>
             <button type="button" class="ow-act" id="ow_unjoin">Leave hotspot</button>
-          </div>
-          <div id="ow_logbox" class="ow-card" style="display:none">
-            <div class="ow-r"><span class="ow-lbl" style="margin:0">Log</span><button type="button" id="ow_logx">Hide</button></div>
-            <pre id="ow_log" class="ow-pre"></pre>
           </div>
           <div class="ow-tiles">
             <div class="ow-tile"><small>VM</small><b id="ow_vm">–</b></div>
@@ -1068,42 +1097,31 @@ esac
             <div class="ow-r"><span class="ow-mono" id="ow_access"></span><button type="button" class="ow-ic" id="ow_copy_luci" aria-label="Copy LuCI address" title="Copy LuCI address">${ico('copy')}</button></div>
             <div class="ow-r"><span class="ow-mono" id="ow_ssh_txt"></span><button type="button" class="ow-ic" id="ow_copy_ssh" aria-label="Copy SSH address" title="Copy SSH address">${ico('copy')}</button></div>
           </div>
+          <div id="ow_logbox" class="ow-card" style="display:none">
+            <div class="ow-r"><span class="ow-lbl" style="margin:0">Log</span><button type="button" id="ow_logx">Hide</button></div>
+            <pre id="ow_log" class="ow-pre"></pre>
+          </div>
 
-          <details class="ow-card" open>
-            <summary>Settings</summary>
-            <div class="ow-f">
-              <div><label for="ow_cpus">CPUs</label><input type="number" id="ow_cpus" min="1" max="4"></div>
-              <div><label for="ow_mem_sel">Memory</label><select id="ow_mem_sel">${MEM_CHOICES.map((m) => `<option>${m}</option>`).join('')}</select></div>
-              <div><label for="ow_ssh">SSH port</label><input type="number" id="ow_ssh"></div>
-              <div><label for="ow_web">LuCI port</label><input type="number" id="ow_web"></div>
-              <div><label for="ow_dns">DNS</label><input type="text" id="ow_dns"></div>
-              <div><label for="ow_wan">Cellular</label><input type="text" id="ow_wan"></div>
-            </div>
-            <label class="ow-sw"><input type="checkbox" id="ow_boot"> Start on boot</label>
-            <label class="ow-sw"><input type="checkbox" id="ow_hotspot"> OpenWrt serves hotspot (192.168.88.x)</label>
-            <label class="ow-sw"><input type="checkbox" id="ow_expose"> LuCI and SSH from hotspot (192.168.0.x)</label>
-            <div class="ow-note">No root password by default. Set one in LuCI (System > Administration) before enabling hotspot options. Applies at next start.</div>
-            <div class="ow-r" style="margin-top:8px"><span></span><button type="button" class="ow-act ow-pri" id="ow_save">Save</button></div>
-          </details>
+          <div class="ow-sec">Settings</div>
+          <div class="ow-f">
+            <div><label for="ow_cpus">CPUs</label><input type="number" id="ow_cpus" min="1" max="4"></div>
+            <div><label for="ow_mem_sel">Memory</label><select id="ow_mem_sel">${MEM_CHOICES.map((m) => `<option>${m}</option>`).join('')}</select></div>
+            <div><label for="ow_dns">DNS</label><input type="text" id="ow_dns"></div>
+            <div><label for="ow_ssh">SSH port</label><input type="number" id="ow_ssh"></div>
+            <div><label for="ow_web">LuCI port</label><input type="number" id="ow_web"></div>
+            <div><label for="ow_wan">Cellular</label><input type="text" id="ow_wan"></div>
+          </div>
+          <label class="ow-sw"><span>Start on boot</span><input type="checkbox" class="ow-cb" id="ow_boot"><i class="ow-tg" aria-hidden="true"></i></label>
+          <div class="ow-r ow-sv2"><div class="ow-note" style="margin:0">Hotspot and LuCI/SSH from the hotspot are on. Root has no password: set one in LuCI (System > Administration). Changes apply at next start.</div><button type="button" class="ow-act ow-pri" id="ow_save">Save</button></div>
 
-          <details class="ow-card" open>
-            <summary>Maintenance</summary>
-            <span class="ow-lbl">Release</span>
-            <div class="ow-bs"><button type="button" class="ow-act" id="ow_install">Install</button><button type="button" class="ow-act" id="ow_import">Import</button><input type="file" id="ow_impfile" accept=".gz,.tgz,application/gzip,application/x-gzip" style="display:none"><button type="button" class="ow-act" id="ow_checkup">Check</button><button type="button" class="ow-act" id="ow_relpage">Releases</button><button type="button" class="ow-act" id="ow_rollback">Roll back</button></div>
-            <div class="ow-bar"><i id="ow_prog"></i></div>
-            <div class="ow-note" id="ow_prog_txt"></div>
-            <div class="ow-note" id="ow_pinnote"></div>
-            <div class="ow-note">Install replaces the OpenWrt disk. Export settings first in LuCI (System > Backup). Previous release kept for one roll back.</div>
-            <span class="ow-lbl">Backups</span>
-            <div id="ow_backups" class="ow-note" style="margin-top:0"></div>
-            <div class="ow-r" style="margin-top:8px"><button type="button" class="ow-act" id="ow_backup">${ico('down')}Back up now</button><button type="button" class="ow-act ow-dng" id="ow_remove">Remove VM</button></div>
-            <div class="ow-note">Backup needs the VM stopped and restores only on the same release. Remove deletes the VM files; backups stay in ${esc(DIR)}/backup.</div>
-          </details>
-
-          <details class="ow-card">
-            <summary>Logs and report</summary>
-            <div class="ow-bs" style="margin-top:8px"><button type="button" class="ow-act" id="ow_logs">Show logs</button><button type="button" class="ow-act" id="ow_copy">Copy report</button></div>
-          </details>
+          <div class="ow-sec">Maintenance</div>
+          <div class="ow-bs"><button type="button" class="ow-act" id="ow_install">Install</button><button type="button" class="ow-act" id="ow_import">Import</button><input type="file" id="ow_impfile" accept=".gz,.tgz,application/gzip,application/x-gzip" style="display:none"><button type="button" class="ow-act" id="ow_checkup">Check</button><button type="button" class="ow-act" id="ow_relpage">Releases</button><button type="button" class="ow-act" id="ow_rollback">Roll back</button></div>
+          <div class="ow-bar"><i id="ow_prog"></i></div>
+          <div class="ow-note" id="ow_prog_txt"></div>
+          <div class="ow-note"><span id="ow_pinnote"></span> Install and Import replace the OpenWrt disk: export settings in LuCI first (System > Backup). The previous release is kept for one roll back.</div>
+          <div id="ow_backups" class="ow-note" style="margin-top:5px"></div>
+          <div class="ow-bs" style="margin-top:6px"><button type="button" class="ow-act" id="ow_backup">${ico('down')}Back up now</button><button type="button" class="ow-act" id="ow_logs">Show logs</button><button type="button" class="ow-act" id="ow_copy">Copy report</button><button type="button" class="ow-act ow-dng" id="ow_remove" style="margin-left:auto">Remove VM</button></div>
+          <div class="ow-note">Backup needs the VM stopped and restores only on the same release. Remove deletes the VM files; backups stay in ${esc(DIR)}/backup.</div>
         </div>`,
     });
     if (!created?.id) throw new Error('createModal did not return a dialog (is the page fully loaded?)');
@@ -1148,7 +1166,7 @@ esac
       const st = await refresh(true);
       const logs = (await runRoot(mgr('logs'), 20000)).text;
       const chk = (await runRoot(mgr('check'), 20000)).text;
-      const text = [`plugin 1.0 tag ${RELEASE_TAG} pinned=${PIN_SUMS_SHA256 ? 'yes' : 'no'}`, '', ...Object.entries(st).map(([k, v]) => `${k}=${v}`), '', '== check ==', chk, '', '== logs ==', logs].join('\n');
+      const text = [`plugin 1.6 tag ${RELEASE_TAG} pinned=${PIN_SUMS_SHA256 ? 'yes' : 'no'}`, '', ...Object.entries(st).map(([k, v]) => `${k}=${v}`), '', '== check ==', chk, '', '== logs ==', logs].join('\n');
       try { await navigator.clipboard.writeText(text); toast('Report copied', 'green', 3000); } catch (_) { showLog(text); toast('Copy failed, report shown above', 'orange', 5000); }
     }, '…');
 
@@ -1156,7 +1174,6 @@ esac
       const s = readSettingsForm();
       const v = validateSettings(s);
       if (!v.ok) throw new Error(v.error);
-      if ((s.hotspot || s.expose) && !(confirmBox('This exposes OpenWrt to hotspot users. Root password set?'))) return;
       await saveSettings(s);
       await setBoot(q('#ow_boot').checked);
       toast(lastState?.running === '1' ? 'Saved. Restart VM to apply' : 'Saved', 'green', 4000);
@@ -1226,6 +1243,13 @@ esac
       toast('No root. Enable root for MatchiTOOL, then reopen.', 'red', 7000);
       return;
     }
+    try {
+      const cur = confToSettings(await readConf());
+      if (!(cur.hotspot && cur.expose)) {
+        await saveSettings({ ...cur, hotspot: true, expose: true });
+        if (lastState?.running === '1') toast('Hotspot is now on by default. Restart the VM to apply', 'orange', 6000);
+      }
+    } catch (_) { /* settings stay as they are */ }
     await refresh(true);
     fillSettings().catch(() => {});
     fillBackups().catch(() => {});

@@ -11,6 +11,10 @@ echo 0 > "$T/ipf"; : > "$T/kvm"; mkdir -p "$T/dev"; : > "$T/dev/tun"
 printf 'CapEff:\t0000000000001000\n' > "$T/caps_ok"
 printf 'CapEff:\t00000000000000c0\n' > "$T/caps_no"
 cat > "$OWRT_DIR/vm.conf" <<C
+LAN=0
+LAN_JOIN=0
+GUEST_DHCP4=0
+EXPOSE=0
 START_SLEEP=1
 BOOT_WAIT=5
 STOP_WAIT=5

@@ -1,26 +1,24 @@
-# Copy to vm.conf (same folder as owrt-vm.sh) and change only what you need.
-# This file is read as shell. Root-owned, do not put untrusted text in it.
+# Copy to vm.conf next to owrt-vm.sh. Read as shell. Only change what you need.
+# Defaults already give hotspot mode: OpenWrt is the DHCP server of the hotspot LAN.
 CPUS=2
 MEM=256M
-HALT_POLL=0              # KVM halt polling (ns) while the VM runs; 0 = off, empty = leave the host as is
-NET=1                    # 0 = boot with no network at all
-WAN_IF=sipa_eth0         # cellular interface of the F50
-DNS_UP=8.8.8.8           # upstream DNS the guest's queries are sent to
-BOOT_WAIT=60             # seconds start waits for the guest to answer ping
-WAIT_SVC=1               # 1 = start also waits until LuCI answers (needs nc)
-SVC_WAIT=60              # seconds start waits for LuCI after the ping answered
-TEST_WAIT=30             # seconds "test" retries before it reports FAIL
+HALT_POLL=0              # KVM halt polling ns while the VM runs; empty = leave as is
+NET=1
+WAN_IF=sipa_eth0         # cellular interface
+DNS_UP=8.8.8.8
+BOOT_WAIT=60             # seconds to wait for guest ping
+WAIT_SVC=1               # also wait for LuCI (needs nc)
+SVC_WAIT=60
+TEST_WAIT=30
 
-# Step 2: port forwards for phones/PCs on the hotspot. OFF by default.
-# The guest has NO root password yet: set one first (start fg, run passwd).
-# Anyone who can join your hotspot reaches SSH and LuCI when this is 1.
-EXPOSE=0
-EXPOSE_IF=br0            # hotspot bridge of the F50
-HOTSPOT_NET=             # subnet of EXPOSE_IF, e.g. 192.168.0.0/24. Empty = auto-detect
+# Hotspot LAN (defaults)
+LAN=1                    # guest LAN NIC (eth1), host 192.168.88.2 <-> guest 192.168.88.1
+LAN_JOIN=1               # join it to br0 after boot
+GUEST_DHCP4=1            # OpenWrt serves DHCPv4; Android's DHCP on br0 is blocked
+
+# Forwards for hotspot clients (defaults)
+EXPOSE=1
+EXPOSE_IF=br0
+HOTSPOT_NET=             # empty = detect from EXPOSE_IF
 SSH_PORT=2223            # host port -> guest 22
-WEB_PORT=8081            # host port -> guest 80 (LuCI). Not 8080: it is used on the F50
-
-# Step 3a: second NIC (eth1, LAN) for the guest on its own tap, host
-# 192.168.88.2 <-> guest 192.168.88.1. NOT joined to br0: the hotspot and
-# Android's DHCP are not touched. Needs NET=1.
-LAN=0
+WEB_PORT=8081            # host port -> guest 80 (not 8080, used on the F50)

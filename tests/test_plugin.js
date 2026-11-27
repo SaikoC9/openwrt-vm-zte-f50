@@ -63,7 +63,7 @@ const ctx = vm.createContext({ window: win, btoa: (s) => Buffer.from(s, 'binary'
   ok('plugin loads in test mode and exposes its api', A && typeof A.validateSettings === 'function');
 
   // ---- header the host reads
-  ok('header: name, version, requires', /@matchi-name OpenWrt VM/.test(pluginSrc) && /@matchi-version 1\.0/.test(pluginSrc) && /@matchi-requires root, curl/.test(pluginSrc));
+  ok('header: name, version, requires', /@matchi-name OpenWrt VM/.test(pluginSrc) && /@matchi-version 1\.7/.test(pluginSrc) && /@matchi-requires root, curl/.test(pluginSrc));
   ok('header: boot file and uninstall hooks are declared', /@matchi-boot \/data\/local\/matchitool\/boot\.d\/30-openwrt-vm\.sh/.test(pluginSrc) && (pluginSrc.match(/@matchi-uninstall/g) || []).length === 3 && /@matchi-check /.test(pluginSrc));
   ok('uninstall keeps backup/ and vm.conf is removed with the files', !/rm -rf [^\n]*backup/.test(pluginSrc.split('\n').filter((l) => l.includes('@matchi-uninstall')).join('\n')));
 
