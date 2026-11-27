@@ -43,6 +43,7 @@ Join the F50 by **WiFi hotspot** or **USB tethering**, then:
 - `eth1` (LAN) joins the hotspot bridge `br0`. OpenWrt answers DHCP there; Android's DHCP on `br0` is blocked.
 - `eth0` (WAN) is a tap to the phone, which NATs it to cellular.
 - Clients that still hold an old Android lease (`192.168.0.x`) must reconnect to get a `192.168.88.x` address.
+- USB tether: the PC end of the cable can have the same MAC as `usb0`, and a bridge never forwards a frame to a port whose MAC is the destination. While the LAN is joined, `usb0` gets its own MAC (`USB_MAC`, default `fe:54:00:66:00:05`); `stop` puts the original back.
 
 ## Manage
 

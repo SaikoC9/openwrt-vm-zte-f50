@@ -55,6 +55,8 @@ LAN_NET=192.168.88.0/24
 LAN_JOIN=1
 LAN_BRIDGE=br0
 LAN_TAP_MAC=fe:54:00:66:00:04
+USB_IF=usb0
+USB_MAC=fe:54:00:66:00:05   # empty = leave usb0 alone
 GUEST_DHCP4=1
 JOIN_WAIT=10
 BLOCK_TIMEOUT=180
@@ -90,6 +92,7 @@ TUN_STATE=$RUN/tun_link
 LAN_STATE=$RUN/lan_join
 BLOCK_STATE=$RUN/dhcp_block
 HALT_STATE=$RUN/halt_poll_ns
+USB_MAC_STATE=$RUN/usb_mac
 CONSOLE=$DIR/console.log
 VMMLOG=$DIR/vmm.log
 CH=$DIR/cloud-hypervisor
@@ -198,6 +201,65 @@ lan_joined() {
   ip -4 addr show dev "$LAN_BRIDGE" 2>/dev/null | grep -q "inet $HOST_LAN_IP/"
 }
 
+# ---------------------------------------------------------------- usb0 MAC
+# On the F50 both ends of the USB cable can have the SAME MAC (usb0 here, the PC's
+# enx... card there). usb0 is a port of br0, and a bridge treats a frame whose
+# destination is one of its own port MACs as "for me": it never forwards it out of
+# that port. Replies from OpenWrt to the PC (DHCP, ARP, TCP) are therefore dropped,
+# the PC gets no IPv4 address and neither LuCI nor the console can be opened over
+# USB. Fix: give usb0 its own MAC while the LAN is joined; stop/unjoin put the
+# original back. fe:.. is locally administered and higher than the other ports, so
+# br0 does not pick it as its own MAC.
+usb_mac_get() {
+  ip link show dev "$USB_IF" 2>/dev/null |
+    sed -n 's|^ *link/ether \([0-9a-fA-F:]*\) .*|\1|p' | head -n 1
+}
+
+# usb_mac_apply MAC: try a live change, then (if the driver refuses while up) down, set, up.
+usb_mac_apply() {
+  ip link set dev "$USB_IF" address "$1" 2>/dev/null && return 0
+  ip link set dev "$USB_IF" down 2>/dev/null
+  ip link set dev "$USB_IF" address "$1" 2>/dev/null; um_rc=$?
+  ip link set dev "$USB_IF" up 2>/dev/null
+  return $um_rc
+}
+
+usb_mac_set() {
+  [ -n "$USB_MAC" ] || return 0
+  case $USB_MAC in
+    [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) ;;
+    *) say "usb: USB_MAC '$USB_MAC' is not a MAC address, $USB_IF left alone"; return 0 ;;
+  esac
+  ip link show dev "$USB_IF" >/dev/null 2>&1 || return 0
+  um_cur=$(usb_mac_get)
+  [ -n "$um_cur" ] || return 0
+  [ "$um_cur" = "$USB_MAC" ] && return 0
+  mkdir -p "$RUN" 2>/dev/null
+  # only the first original is kept, so a start after a crash still restores the real one
+  [ -e "$USB_MAC_STATE" ] || echo "$um_cur" > "$USB_MAC_STATE" 2>/dev/null || return 0
+  if usb_mac_apply "$USB_MAC" && [ "$(usb_mac_get)" = "$USB_MAC" ]; then
+    say "usb: $USB_IF MAC $um_cur -> $USB_MAC (a PC with the same MAC could not receive OpenWrt's replies); undone by stop"
+    return 0
+  fi
+  say "WARNING: could not change the MAC of $USB_IF; a USB tethering PC may get no address from OpenWrt"
+  [ "$(usb_mac_get)" = "$um_cur" ] && rm -f "$USB_MAC_STATE"
+  return 0
+}
+
+# Safe to run at any time, also when nothing was changed.
+usb_mac_restore() {
+  [ -e "$USB_MAC_STATE" ] || return 0
+  read -r um_orig < "$USB_MAC_STATE" 2>/dev/null
+  if [ -n "$um_orig" ] && ip link show dev "$USB_IF" >/dev/null 2>&1; then
+    if [ "$(usb_mac_get)" != "$um_orig" ]; then
+      usb_mac_apply "$um_orig"
+      [ "$(usb_mac_get)" = "$um_orig" ] || { say "WARNING: could not restore the MAC of $USB_IF to $um_orig (a phone reboot does)"; return 0; }
+    fi
+  fi
+  rm -f "$USB_MAC_STATE"
+  return 0
+}
+
 # Undo join. Safe to run at any time, also when nothing is joined.
 lan_unjoin() {
   dhcp_unblock
@@ -209,6 +271,7 @@ lan_unjoin() {
       ip addr add "$HOST_LAN_IP/$LAN_PREFIX" dev "$LAN_TAP" 2>/dev/null
     ip link set dev "$LAN_TAP" up 2>/dev/null
   fi
+  usb_mac_restore
   rm -f "$LAN_STATE"
   return 0
 }
@@ -239,6 +302,7 @@ lan_join() {
   # while DHCP and SSH from clients timed out. Accept br0 -> br0 in our own chain.
   ipt -n -L OWRT_FWD >/dev/null 2>&1 &&
     must ipt -I OWRT_FWD 1 -i "$LAN_BRIDGE" -o "$LAN_BRIDGE" -j ACCEPT || { lan_unjoin; return 1; }
+  usb_mac_set
   i=0; ok=0
   while [ "$i" -lt "$JOIN_WAIT" ]; do
     if ping -c 1 -W 1 "$LAN_IP" >/dev/null 2>&1; then ok=1; break; fi
@@ -459,6 +523,7 @@ net_down_rules() {
 net_down() {
   net_down_rules
   lan_joined && ip addr del "$HOST_LAN_IP/$LAN_PREFIX" dev "$LAN_BRIDGE" 2>/dev/null
+  usb_mac_restore
   rm -f "$LAN_STATE"
   ip link del "$TAP" 2>/dev/null
   ip link del "$LAN_TAP" 2>/dev/null
@@ -509,6 +574,7 @@ leftovers() {
   lan_joined && { say "left: $HOST_LAN_IP on $LAN_BRIDGE"; LEFT=$((LEFT + 1)); }
   [ -e "$LAN_STATE" ] && { say "left: join state"; LEFT=$((LEFT + 1)); }
   [ -e "$HALT_STATE" ] && { say "left: KVM halt polling not restored"; LEFT=$((LEFT + 1)); }
+  [ -e "$USB_MAC_STATE" ] && { say "left: $USB_IF MAC not restored"; LEFT=$((LEFT + 1)); }
   return 0
 }
 

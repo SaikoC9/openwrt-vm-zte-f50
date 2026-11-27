@@ -15,6 +15,8 @@ TEST_WAIT=30
 LAN=1                    # guest LAN NIC (eth1), host 192.168.88.2 <-> guest 192.168.88.1
 LAN_JOIN=1               # join it to br0 after boot
 GUEST_DHCP4=1            # OpenWrt serves DHCPv4; Android's DHCP on br0 is blocked
+USB_IF=usb0              # USB tether port of br0
+USB_MAC=fe:54:00:66:00:05  # MAC given to usb0 while joined (the PC end of the cable may use the same one); empty = leave alone
 
 # Forwards for hotspot clients (defaults)
 EXPOSE=1
